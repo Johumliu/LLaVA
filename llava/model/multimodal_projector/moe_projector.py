@@ -111,7 +111,8 @@ class MoEProjector(nn.Module):
         original_shape = x.shape
         if len(original_shape) == 3:
             batch_size, seq_len, input_size = original_shape
-            x = x.view(-1, input_size)  # [batch_size * seq_len, input_size]
+            # 使用reshape和contiguous确保兼容性
+            x = x.contiguous().reshape(-1, input_size)  # [batch_size * seq_len, input_size]
         else:
             batch_size, input_size = original_shape
             seq_len = 1
@@ -151,7 +152,7 @@ class MoEProjector(nn.Module):
         
         # 恢复原始形状
         if len(original_shape) == 3:
-            output = output.view(batch_size, seq_len, self.output_size)
+            output = output.reshape(batch_size, seq_len, self.output_size)
         
         return output
     
@@ -311,7 +312,8 @@ class CompatibleMoEProjector(nn.Module):
         original_shape = x.shape
         if len(original_shape) == 3:
             batch_size, seq_len, input_size = original_shape
-            x = x.view(-1, input_size)  # [batch_size * seq_len, input_size]
+            # 使用reshape和contiguous确保兼容性
+            x = x.contiguous().reshape(-1, input_size)  # [batch_size * seq_len, input_size]
         else:
             batch_size, input_size = original_shape
             seq_len = 1
@@ -351,7 +353,7 @@ class CompatibleMoEProjector(nn.Module):
         
         # 恢复原始形状
         if len(original_shape) == 3:
-            output = output.view(batch_size, seq_len, self.output_size)
+            output = output.reshape(batch_size, seq_len, self.output_size)
         
         return output
     
