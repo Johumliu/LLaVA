@@ -30,6 +30,7 @@ import tokenizers
 from llava.constants import IGNORE_INDEX, IMAGE_TOKEN_INDEX, DEFAULT_IMAGE_TOKEN, DEFAULT_IM_START_TOKEN, DEFAULT_IM_END_TOKEN
 from torch.utils.data import Dataset
 from llava.train.llava_trainer import LLaVATrainer
+from llava.train.adaptive_llava_trainer import AdaptiveLLaVATrainer
 
 from llava import conversation as conversation_lib
 from llava.model import *
@@ -64,6 +65,12 @@ class ModelArguments:
     mm_use_im_patch_token: bool = field(default=True)
     mm_patch_merge_type: Optional[str] = field(default='flat')
     mm_vision_select_feature: Optional[str] = field(default="patch")
+    
+    # 新增的自适应参数
+    use_adaptive_layer_selection: bool = field(default=False)
+    top_k_layers: int = field(default=3)
+    mm_moe_num_experts: int = field(default=8)
+    mm_moe_top_k: int = field(default=2)
 
 
 @dataclass
@@ -98,18 +105,10 @@ class TrainingArguments(transformers.TrainingArguments):
         default="nf4",
         metadata={"help": "Quantization data type to use. Should be one of `fp4` or `nf4`."}
     )
-    bits: int = field(
-        default=16,
-        metadata={"help": "How many bits to use."}
-    )
-    lora_enable: bool = False
-    lora_r: int = 64
-    lora_alpha: int = 16
-    lora_dropout: float = 0.05
-    lora_weight_path: str = ""
-    lora_bias: str = "none"
-    mm_projector_lr: Optional[float] = None
-    group_by_modality_length: bool = field(default=False)
+    
+    # 新增的自适应训练参数
+    layer_classifier_loss_weight: float = field(default=0.1)
+    moe_load_balancing_weight: float = field(default=0.01)
 
 
 def maybe_zero_3(param, ignore_status=False, name=None):
@@ -913,7 +912,7 @@ def train(attn_implementation=None):
             fsdp=training_args.fsdp
         )
         
-        vision_tower = model.get_vision_tower()
+        vision_tower = model.get_model().vision_tower
         vision_tower.to(dtype=torch.bfloat16 if training_args.bf16 else torch.float16, device=training_args.device)
 
         data_args.image_processor = vision_tower.image_processor
@@ -942,6 +941,13 @@ def train(attn_implementation=None):
         training_args.use_im_start_end = model_args.mm_use_im_start_end
         model.config.mm_use_im_patch_token = model_args.mm_use_im_patch_token
         model.initialize_vision_tokenizer(model_args, tokenizer=tokenizer)
+        
+        # 设置自适应参数
+        if model_args.use_adaptive_layer_selection:
+            model.config.use_adaptive_layer_selection = True
+            model.config.top_k_layers = model_args.top_k_layers
+            model.config.mm_moe_num_experts = model_args.mm_moe_num_experts
+            model.config.mm_moe_top_k = model_args.mm_moe_top_k
 
     if training_args.bits in [4, 8]:
         from peft.tuners.lora import LoraLayer
@@ -958,10 +964,18 @@ def train(attn_implementation=None):
 
     data_module = make_supervised_data_module(tokenizer=tokenizer,
                                               data_args=data_args)
-    trainer = LLaVATrainer(model=model,
-                    tokenizer=tokenizer,
-                    args=training_args,
-                    **data_module)
+    
+    # 根据是否使用自适应层选择来选择训练器
+    if model_args.use_adaptive_layer_selection:
+        trainer = AdaptiveLLaVATrainer(model=model,
+                        tokenizer=tokenizer,
+                        args=training_args,
+                        **data_module)
+    else:
+        trainer = LLaVATrainer(model=model,
+                        tokenizer=tokenizer,
+                        args=training_args,
+                        **data_module)
 
     if list(pathlib.Path(training_args.output_dir).glob("checkpoint-*")):
         trainer.train(resume_from_checkpoint=True)

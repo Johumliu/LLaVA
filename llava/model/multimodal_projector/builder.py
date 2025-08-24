@@ -1,6 +1,7 @@
 import torch
 import torch.nn as nn
 import re
+from .moe_projector import MoEProjector, AdaptiveMoEProjector
 
 
 class IdentityMap(nn.Module):
@@ -47,5 +48,16 @@ def build_vision_projector(config, delay_load=False, **kwargs):
 
     if projector_type == 'identity':
         return IdentityMap()
+    
+    # 新增的MOE投影器类型
+    if projector_type == 'moe':
+        num_experts = getattr(config, 'mm_moe_num_experts', 8)
+        top_k = getattr(config, 'mm_moe_top_k', 2)
+        return MoEProjector(config, num_experts=num_experts, top_k=top_k)
+    
+    if projector_type == 'adaptive_moe':
+        num_experts = getattr(config, 'mm_moe_num_experts', 8)
+        top_k = getattr(config, 'mm_moe_top_k', 2)
+        return AdaptiveMoEProjector(config, num_experts=num_experts, top_k=top_k)
 
     raise ValueError(f'Unknown projector type: {projector_type}')
