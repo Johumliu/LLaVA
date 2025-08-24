@@ -1,7 +1,7 @@
 import torch
 import torch.nn as nn
 import re
-from .moe_projector import MoEProjector, AdaptiveMoEProjector
+from .moe_projector import MoEProjector, AdaptiveMoEProjector, CompatibleMoEProjector
 
 
 class IdentityMap(nn.Module):
@@ -59,5 +59,10 @@ def build_vision_projector(config, delay_load=False, **kwargs):
         num_experts = getattr(config, 'mm_moe_num_experts', 8)
         top_k = getattr(config, 'mm_moe_top_k', 2)
         return AdaptiveMoEProjector(config, num_experts=num_experts, top_k=top_k)
+    
+    if projector_type == 'compatible_moe':
+        num_experts = getattr(config, 'mm_moe_num_experts', 8)
+        top_k = getattr(config, 'mm_moe_top_k', 2)
+        return CompatibleMoEProjector(config, num_experts=num_experts, top_k=top_k)
 
     raise ValueError(f'Unknown projector type: {projector_type}')

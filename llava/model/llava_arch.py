@@ -94,7 +94,22 @@ class LlavaMetaModel:
             def get_w(weights, keyword):
                 return {k.split(keyword + '.')[1]: v for k, v in weights.items() if keyword in k}
 
-            self.mm_projector.load_state_dict(get_w(mm_projector_weights, 'mm_projector'))
+            # 检查投影器类型，如果是MOE类型，则尝试兼容加载
+            projector_type = getattr(self.config, 'mm_projector_type', 'linear')
+            if 'moe' in projector_type:
+                if hasattr(self.mm_projector, 'load_pretrained_weights'):
+                    # 使用兼容的MOE投影器
+                    pretrained_weights = get_w(mm_projector_weights, 'mm_projector')
+                    self.mm_projector.load_pretrained_weights(pretrained_weights)
+                else:
+                    print(f"Warning: Skipping pretrain weight loading for {projector_type} projector due to structure mismatch")
+                    print("The MOE projector will be initialized with random weights")
+            else:
+                try:
+                    self.mm_projector.load_state_dict(get_w(mm_projector_weights, 'mm_projector'))
+                except Exception as e:
+                    print(f"Warning: Failed to load pretrain weights: {e}")
+                    print("The projector will be initialized with random weights")
 
 
 def unpad_image(tensor, original_size):

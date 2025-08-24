@@ -109,6 +109,20 @@ class TrainingArguments(transformers.TrainingArguments):
     # 新增的自适应训练参数
     layer_classifier_loss_weight: float = field(default=0.1)
     moe_load_balancing_weight: float = field(default=0.01)
+    
+    # 添加缺失的参数
+    bits: int = field(
+        default=16,
+        metadata={"help": "How many bits to use."}
+    )
+    lora_enable: bool = field(default=False)
+    lora_r: int = field(default=64)
+    lora_alpha: int = field(default=16)
+    lora_dropout: float = field(default=0.05)
+    lora_weight_path: str = field(default="")
+    lora_bias: str = field(default="none")
+    mm_projector_lr: Optional[float] = field(default=None)
+    group_by_modality_length: bool = field(default=False)
 
 
 def maybe_zero_3(param, ignore_status=False, name=None):
