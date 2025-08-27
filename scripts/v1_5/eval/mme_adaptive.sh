@@ -8,7 +8,7 @@ MODEL_PATH=${1:-./checkpoints/llava-v1.5-7b-adaptive}
 DATA_ROOT=${2:-./playground/data}
 
 MME_QA_FILE=${DATA_ROOT}/eval/MME/llava_mme.jsonl
-MME_IMAGE_DIR=${DATA_ROOT}/eval/MME/MME_Benchmark_release_version
+MME_IMAGE_DIR=${DATA_ROOT}/eval/MME/MME_Benchmark_release_version/MME_Benchmark
 ANSWERS_DIR=${DATA_ROOT}/eval/MME/answers
 EXP_NAME=llava-v1.5-7b-adaptive
 ANSWERS_FILE=${ANSWERS_DIR}/${EXP_NAME}.jsonl
