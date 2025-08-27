@@ -248,8 +248,42 @@ class LLaVATrainer(Trainer):
         else:
             super(LLaVATrainer, self)._save_checkpoint(model, trial, metrics)
 
+    def _sanitize_generation_config(self):
+        """清理不一致的 generation_config，避免保存时报错。
+        当 do_sample=False 时，移除仅采样模式使用的参数。
+        """
+        try:
+            gc = getattr(self.model, "generation_config", None)
+            if gc is None:
+                return
+            do_sample = getattr(gc, "do_sample", False)
+            if not do_sample:
+                # 清理仅在采样模式使用、会触发保存告警的字段
+                for attr in ["temperature", "top_p", "top_k", "typical_p", "penalty_alpha"]:
+                    if hasattr(gc, attr):
+                        try:
+                            setattr(gc, attr, None)
+                        except Exception:
+                            pass
+        except Exception:
+            # 清理失败不影响训练
+            pass
+
     def _save(self, output_dir: Optional[str] = None, state_dict=None):
         if getattr(self.args, 'tune_mm_mlp_adapter', False):
             pass
         else:
-            super(LLaVATrainer, self)._save(output_dir, state_dict)
+            # 先清理 generation_config，避免因不一致参数导致保存报错
+            self._sanitize_generation_config()
+            try:
+                super(LLaVATrainer, self)._save(output_dir, state_dict)
+            except Exception as e:
+                # 回退策略：重置为默认 GenerationConfig 后重试一次
+                try:
+                    from transformers import GenerationConfig
+                    if hasattr(self.model, "generation_config"):
+                        self.model.generation_config = GenerationConfig()
+                    super(LLaVATrainer, self)._save(output_dir, state_dict)
+                except Exception:
+                    # 仍失败则记录并抛出原错误，便于定位
+                    raise e
