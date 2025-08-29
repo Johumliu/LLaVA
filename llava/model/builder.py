@@ -170,6 +170,25 @@ def load_pretrained_model(model_path, model_base, model_name, load_8bit=False, l
             model.config.bos_token_id = tokenizer.bos_token_id
         if getattr(model.config, "eos_token_id", None) is None and getattr(tokenizer, "eos_token_id", None) is not None:
             model.config.eos_token_id = tokenizer.eos_token_id
+
+        # Hard fallbacks for models/tokenizers that don't define these ids (e.g., some LLaMA variants)
+        if getattr(model.config, "bos_token_id", None) is None:
+            model.config.bos_token_id = getattr(tokenizer, "bos_token_id", None) or 1
+        if getattr(model.config, "eos_token_id", None) is None:
+            model.config.eos_token_id = getattr(tokenizer, "eos_token_id", None) or 2
+        if getattr(model.config, "pad_token_id", None) is None:
+            model.config.pad_token_id = getattr(tokenizer, "pad_token_id", None) or getattr(model.config, "eos_token_id", None)
+
+        # Also sync generation_config which is used by HF generate()
+        gen_cfg = getattr(model, "generation_config", None)
+        if gen_cfg is not None:
+            if getattr(gen_cfg, "pad_token_id", None) is None:
+                gen_cfg.pad_token_id = getattr(model.config, "pad_token_id", None) or getattr(tokenizer, "pad_token_id", None) or getattr(tokenizer, "eos_token_id", None)
+            if getattr(gen_cfg, "eos_token_id", None) is None:
+                gen_cfg.eos_token_id = getattr(model.config, "eos_token_id", None) or getattr(tokenizer, "eos_token_id", None)
+            if getattr(gen_cfg, "bos_token_id", None) is None:
+                # Prefer config/tokenizer, otherwise fall back to 1 (LLaMA default)
+                gen_cfg.bos_token_id = getattr(model.config, "bos_token_id", None) or getattr(tokenizer, "bos_token_id", None) or 1
     except Exception:
         pass
 
