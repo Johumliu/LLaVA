@@ -108,6 +108,8 @@ class AdaptiveCLIPVisionTower(nn.Module):
                 vision_hidden_size=self.vision_tower.config.hidden_size,
                 num_layers=num_layers
             )
+            # 放到与视觉塔同device/dtype
+            self.layer_classifier.to(device=self.device, dtype=self.dtype)
         
         self.is_loaded = True
     
@@ -166,8 +168,22 @@ class AdaptiveCLIPVisionTower(nn.Module):
             # 使用第一层的特征作为分类器的输入
             classifier_input = features[0]  # [1, seq_len, hidden_size]
             
-            # 获取层概率分布
-            layer_probs, layer_logits = self.layer_classifier(classifier_input, text_features)
+            # 对齐 device/dtype，并在需要时压缩文本特征到视觉隐藏维度
+            tf = None
+            if text_features is not None:
+                if len(text_features.shape) == 3:
+                    tf = text_features.mean(dim=1)
+                else:
+                    tf = text_features
+                tf = tf.to(device=self.device, dtype=self.dtype)
+                # 若维度不一致，增加一次线性投影
+                if tf.shape[-1] != self.vision_tower.config.hidden_size:
+                    proj = getattr(self, 'text_proj', None)
+                    if proj is None or proj.in_features != tf.shape[-1]:
+                        self.text_proj = nn.Linear(tf.shape[-1], self.vision_tower.config.hidden_size).to(device=self.device, dtype=self.dtype)
+                    tf = self.text_proj(tf)
+
+            layer_probs, layer_logits = self.layer_classifier(classifier_input.to(device=self.device, dtype=self.dtype), tf)
             layer_probs_list.append(layer_probs)
             
             if self.training_mode:
