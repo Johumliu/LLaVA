@@ -8,6 +8,15 @@ def build_vision_tower(vision_tower_cfg, **kwargs):
     is_absolute_path_exists = os.path.exists(vision_tower)
     use_s2 = getattr(vision_tower_cfg, 's2', False)
     use_adaptive = getattr(vision_tower_cfg, 'use_adaptive_layer_selection', False)
+    # 环境变量强制开启自适应层选择（不修改checkpoint）
+    force_adaptive = os.environ.get('LLAVA_FORCE_ADAPTIVE', '0') in ('1', 'true', 'True')
+    if force_adaptive and not use_adaptive:
+        try:
+            setattr(vision_tower_cfg, 'use_adaptive_layer_selection', True)
+            use_adaptive = True
+            print('[LLaVA] Force enabling AdaptiveCLIPVisionTower via LLAVA_FORCE_ADAPTIVE=1')
+        except Exception:
+            pass
     
     if is_absolute_path_exists or vision_tower.startswith("openai") or vision_tower.startswith("laion") or "ShareGPT4V" in vision_tower:
         if use_adaptive:

@@ -2,6 +2,7 @@ import torch
 import torch.nn as nn
 import re
 from .moe_projector import MoEProjector, AdaptiveMoEProjector, CompatibleMoEProjector
+import os
 
 
 class IdentityMap(nn.Module):
@@ -33,6 +34,15 @@ class SimpleResBlock(nn.Module):
 
 def build_vision_projector(config, delay_load=False, **kwargs):
     projector_type = getattr(config, 'mm_projector_type', 'linear')
+    # 环境变量强制切换为 adaptive_moe（不修改checkpoint）
+    force_adaptive_moe = os.environ.get('LLAVA_FORCE_ADAPTIVE_MOE', '0') in ('1', 'true', 'True')
+    if force_adaptive_moe and projector_type != 'adaptive_moe':
+        try:
+            setattr(config, 'mm_projector_type', 'adaptive_moe')
+            projector_type = 'adaptive_moe'
+            print('[LLaVA] Force using adaptive_moe projector via LLAVA_FORCE_ADAPTIVE_MOE=1')
+        except Exception:
+            pass
 
     if projector_type == 'linear':
         return nn.Linear(config.mm_hidden_size, config.hidden_size)
