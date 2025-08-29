@@ -159,6 +159,20 @@ def load_pretrained_model(model_path, model_base, model_name, load_8bit=False, l
             vision_tower.to(device=device_map, dtype=torch.float16)
         image_processor = vision_tower.image_processor
 
+    # Ensure special token ids are properly set to avoid generation errors when using inputs_embeds
+    # This guards against ValueError: `bos_token_id` has to be defined when no `input_ids` are provided.
+    try:
+        if tokenizer.pad_token is None and getattr(tokenizer, "eos_token", None) is not None:
+            tokenizer.pad_token = tokenizer.eos_token
+        if getattr(model.config, "pad_token_id", None) is None and tokenizer.pad_token_id is not None:
+            model.config.pad_token_id = tokenizer.pad_token_id
+        if getattr(model.config, "bos_token_id", None) is None and getattr(tokenizer, "bos_token_id", None) is not None:
+            model.config.bos_token_id = tokenizer.bos_token_id
+        if getattr(model.config, "eos_token_id", None) is None and getattr(tokenizer, "eos_token_id", None) is not None:
+            model.config.eos_token_id = tokenizer.eos_token_id
+    except Exception:
+        pass
+
     if hasattr(model.config, "max_sequence_length"):
         context_len = model.config.max_sequence_length
     else:
