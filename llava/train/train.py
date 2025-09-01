@@ -804,6 +804,80 @@ def train(attn_implementation=None):
     parser = transformers.HfArgumentParser(
         (ModelArguments, DataArguments, TrainingArguments))
     model_args, data_args, training_args = parser.parse_args_into_dataclasses()
+    
+    # 添加调试信息
+    rank0_print(f"=== 参数解析结果 ===")
+    rank0_print(f"Model Arguments:")
+    rank0_print(f"  vision_tower: {model_args.vision_tower}")
+    rank0_print(f"  use_adaptive_layer_selection: {model_args.use_adaptive_layer_selection}")
+    rank0_print(f"  top_k_layers: {model_args.top_k_layers}")
+    rank0_print(f"  mm_moe_num_experts: {model_args.mm_moe_num_experts}")
+    rank0_print(f"  mm_moe_top_k: {model_args.mm_moe_top_k}")
+    rank0_print(f"Training Arguments:")
+    rank0_print(f"  layer_classifier_loss_weight: {training_args.layer_classifier_loss_weight}")
+    rank0_print(f"  moe_load_balancing_weight: {training_args.moe_load_balancing_weight}")
+    rank0_print(f"======================")
+    
+    # 手动检查和设置自适应参数（如果参数解析失败）
+    import sys
+    if '--use_adaptive_layer_selection' in sys.argv:
+        model_args.use_adaptive_layer_selection = True
+        rank0_print("手动设置 use_adaptive_layer_selection = True")
+    
+    if '--top_k_layers' in sys.argv:
+        try:
+            idx = sys.argv.index('--top_k_layers')
+            if idx + 1 < len(sys.argv):
+                model_args.top_k_layers = int(sys.argv[idx + 1])
+                rank0_print(f"手动设置 top_k_layers = {model_args.top_k_layers}")
+        except (ValueError, IndexError):
+            pass
+    
+    if '--mm_moe_num_experts' in sys.argv:
+        try:
+            idx = sys.argv.index('--mm_moe_num_experts')
+            if idx + 1 < len(sys.argv):
+                model_args.mm_moe_num_experts = int(sys.argv[idx + 1])
+                rank0_print(f"手动设置 mm_moe_num_experts = {model_args.mm_moe_num_experts}")
+        except (ValueError, IndexError):
+            pass
+    
+    if '--mm_moe_top_k' in sys.argv:
+        try:
+            idx = sys.argv.index('--mm_moe_top_k')
+            if idx + 1 < len(sys.argv):
+                model_args.mm_moe_top_k = int(sys.argv[idx + 1])
+                rank0_print(f"手动设置 mm_moe_top_k = {model_args.mm_moe_top_k}")
+        except (ValueError, IndexError):
+            pass
+    
+    if '--layer_classifier_loss_weight' in sys.argv:
+        try:
+            idx = sys.argv.index('--layer_classifier_loss_weight')
+            if idx + 1 < len(sys.argv):
+                training_args.layer_classifier_loss_weight = float(sys.argv[idx + 1])
+                rank0_print(f"手动设置 layer_classifier_loss_weight = {training_args.layer_classifier_loss_weight}")
+        except (ValueError, IndexError):
+            pass
+    
+    if '--moe_load_balancing_weight' in sys.argv:
+        try:
+            idx = sys.argv.index('--moe_load_balancing_weight')
+            if idx + 1 < len(sys.argv):
+                training_args.moe_load_balancing_weight = float(sys.argv[idx + 1])
+                rank0_print(f"手动设置 moe_load_balancing_weight = {training_args.moe_load_balancing_weight}")
+        except (ValueError, IndexError):
+            pass
+    
+    rank0_print(f"=== 手动设置后的参数 ===")
+    rank0_print(f"  use_adaptive_layer_selection: {model_args.use_adaptive_layer_selection}")
+    rank0_print(f"  top_k_layers: {model_args.top_k_layers}")
+    rank0_print(f"  mm_moe_num_experts: {model_args.mm_moe_num_experts}")
+    rank0_print(f"  mm_moe_top_k: {model_args.mm_moe_top_k}")
+    rank0_print(f"  layer_classifier_loss_weight: {training_args.layer_classifier_loss_weight}")
+    rank0_print(f"  moe_load_balancing_weight: {training_args.moe_load_balancing_weight}")
+    rank0_print(f"======================")
+    
     local_rank = training_args.local_rank
     compute_dtype = (torch.float16 if training_args.fp16 else (torch.bfloat16 if training_args.bf16 else torch.float32))
 
