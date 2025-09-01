@@ -140,6 +140,14 @@ class AdaptiveLLaVATrainer(Trainer):
             'best_layer_idx': best_layer_idx
         }
         
+        # 添加调试日志
+        logger.info(f"步骤 {self.state.global_step}: 损失组件已计算 - "
+                   f"总损失: {total_loss.item():.4f}, "
+                   f"最佳层损失: {best_loss.item():.4f}, "
+                   f"层分类器损失: {layer_classifier_loss.item():.4f}, "
+                   f"MOE负载均衡损失: {moe_load_balancing_loss.item():.4f}, "
+                   f"最佳层索引: {best_layer_idx}")
+        
         # 记录最佳层选择
         batch_size = images.shape[0] if hasattr(images, 'shape') else 1
         for i in range(batch_size):
@@ -245,6 +253,10 @@ class AdaptiveLLaVATrainer(Trainer):
         """每个训练步骤结束时的回调"""
         super().on_step_end()
         
+        # 每个步骤都记录损失组件到wandb
+        if hasattr(self, 'current_loss_components') and self.current_loss_components:
+            self._log_loss_components_to_wandb()
+        
         # 定期记录层选择统计
         if self.state.global_step % 100 == 0:
             self._log_layer_selection_stats()
@@ -253,21 +265,33 @@ class AdaptiveLLaVATrainer(Trainer):
         """记录各个损失组件到wandb"""
         try:
             import wandb
+            logger.info(f"尝试记录损失组件到wandb，步骤: {self.state.global_step}")
+            
             if wandb.run is not None:
+                logger.info(f"Wandb运行状态: {wandb.run.name}, 项目: {wandb.run.project}")
+                
                 # 记录损失组件
-                wandb.log({
+                log_data = {
                     'train/best_layer_loss': self.current_loss_components['best_layer_loss'],
                     'train/layer_classifier_loss': self.current_loss_components['layer_classifier_loss'],
                     'train/moe_load_balancing_loss': self.current_loss_components['moe_load_balancing_loss'],
                     'train/best_layer_idx': self.current_loss_components['best_layer_idx'],
                     'train/total_loss_components': self.current_loss_components['total_loss']
-                }, step=self.state.global_step)
+                }
                 
-                logger.info(f"Wandb记录损失组件 - 最佳层损失: {self.current_loss_components['best_layer_loss']:.4f}, "
+                logger.info(f"准备记录到wandb的数据: {log_data}")
+                wandb.log(log_data, step=self.state.global_step)
+                
+                logger.info(f"Wandb记录成功 - 步骤 {self.state.global_step}: "
+                          f"最佳层损失: {self.current_loss_components['best_layer_loss']:.4f}, "
                           f"层分类器损失: {self.current_loss_components['layer_classifier_loss']:.4f}, "
                           f"MOE负载均衡损失: {self.current_loss_components['moe_load_balancing_loss']:.4f}, "
                           f"最佳层索引: {self.current_loss_components['best_layer_idx']}")
+            else:
+                logger.warning("Wandb运行未初始化")
         except ImportError:
             logger.warning("wandb未安装，无法记录损失组件")
         except Exception as e:
-            logger.warning(f"记录损失组件到wandb时出错: {e}")
+            logger.error(f"记录损失组件到wandb时出错: {e}")
+            import traceback
+            logger.error(f"错误详情: {traceback.format_exc()}")
