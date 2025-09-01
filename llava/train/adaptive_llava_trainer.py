@@ -10,7 +10,13 @@ logger = logging.getLogger(__name__)
 
 
 class AdaptiveLLaVATrainer(Trainer):
-    """支持自适应层选择和MOE投影器的LLaVA训练器"""
+    """支持全层LLM训练和MOE投影器的LLaVA训练器
+    
+    特点：
+    - 所有视觉编码器层都会经过LLM进行前向传播
+    - 自动选择损失最小的层进行监督训练
+    - 支持MOE投影器和层分类器
+    """
     
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
@@ -23,6 +29,9 @@ class AdaptiveLLaVATrainer(Trainer):
         
         # 记录最佳层选择
         self.best_layer_selections = {}
+        
+        # 初始化损失组件记录
+        self.current_loss_components = {}
         
     def compute_loss(self, model, inputs, return_outputs=False):
         """
@@ -56,19 +65,22 @@ class AdaptiveLLaVATrainer(Trainer):
             text_embeddings = model.get_model().embed_tokens(input_ids)
             text_features = text_embeddings
         
-        # 计算top-k层的损失
-        top_k_losses = []
-        top_k_layer_indices = []
+        # 计算所有层的损失
+        all_layer_losses = []
+        all_layer_outputs = []
         
-        for k in range(self.top_k_layers):
-            # 选择第k个最佳层
+        # 遍历所有层
+        for layer_idx in range(len(all_features[0])):  # 假设所有样本的层数相同
+            # 选择当前层的特征
             selected_features = []
             for features in all_features:
-                # 这里简化处理，实际应该根据分类器结果选择
-                layer_idx = min(k, len(features) - 1)
-                selected_features.append(features[layer_idx])
+                if layer_idx < len(features):
+                    selected_features.append(features[layer_idx])
+                else:
+                    # 如果该样本没有这么多层，跳过
+                    continue
             
-            # 使用选定的特征进行前向传播
+            # 使用当前层的特征进行前向传播
             try:
                 # 临时替换视觉特征
                 original_image_features = getattr(model, '_temp_image_features', None)
@@ -78,8 +90,8 @@ class AdaptiveLLaVATrainer(Trainer):
                 outputs = model(**inputs)
                 loss = outputs.loss
                 
-                top_k_losses.append(loss)
-                top_k_layer_indices.append(k)
+                all_layer_losses.append(loss)
+                all_layer_outputs.append(outputs)
                 
                 # 恢复原始特征
                 if original_image_features is not None:
@@ -88,17 +100,24 @@ class AdaptiveLLaVATrainer(Trainer):
                     delattr(model, '_temp_image_features')
                     
             except Exception as e:
-                logger.warning(f"计算第{k}层损失时出错: {e}")
-                top_k_losses.append(torch.tensor(float('inf')))
-                top_k_layer_indices.append(k)
+                logger.warning(f"计算第{layer_idx}层损失时出错: {e}")
+                all_layer_losses.append(torch.tensor(float('inf')))
+                all_layer_outputs.append(None)
         
         # 找到损失最小的层
-        if top_k_losses:
-            min_loss_idx = torch.argmin(torch.stack([loss for loss in top_k_losses if loss != float('inf')]))
-            best_loss = top_k_losses[min_loss_idx]
-            best_layer_idx = top_k_layer_indices[min_loss_idx]
+        if all_layer_losses:
+            # 过滤掉无效的损失
+            valid_losses = [(i, loss) for i, loss in enumerate(all_layer_losses) if loss != float('inf')]
+            if valid_losses:
+                min_loss_idx = min(valid_losses, key=lambda x: x[1])[0]
+                best_loss = all_layer_losses[min_loss_idx]
+                best_layer_idx = min_loss_idx
+                best_outputs = all_layer_outputs[min_loss_idx]
+            else:
+                # 如果没有有效的损失，使用标准训练
+                return super().compute_loss(model, inputs, return_outputs)
         else:
-            # 如果没有有效的损失，使用标准训练
+            # 如果没有损失，使用标准训练
             return super().compute_loss(model, inputs, return_outputs)
         
         # 计算层分类器的损失
@@ -112,6 +131,15 @@ class AdaptiveLLaVATrainer(Trainer):
         # 总损失
         total_loss = best_loss + self.layer_classifier_loss_weight * layer_classifier_loss + self.moe_load_balancing_weight * moe_load_balancing_loss
         
+        # 保存各个损失组件用于wandb记录
+        self.current_loss_components = {
+            'total_loss': total_loss.item(),
+            'best_layer_loss': best_loss.item(),
+            'layer_classifier_loss': layer_classifier_loss.item(),
+            'moe_load_balancing_loss': moe_load_balancing_loss.item(),
+            'best_layer_idx': best_layer_idx
+        }
+        
         # 记录最佳层选择
         batch_size = images.shape[0] if hasattr(images, 'shape') else 1
         for i in range(batch_size):
@@ -120,7 +148,7 @@ class AdaptiveLLaVATrainer(Trainer):
             self.best_layer_selections[i].append(best_layer_idx)
         
         if return_outputs:
-            return total_loss, outputs
+            return total_loss, best_outputs
         else:
             return total_loss
     
@@ -182,6 +210,10 @@ class AdaptiveLLaVATrainer(Trainer):
         # 记录层选择统计
         if self.use_adaptive_layer_selection and self.best_layer_selections:
             self._log_layer_selection_stats()
+        
+        # 记录各个损失组件到wandb
+        if hasattr(self, 'current_loss_components') and self.current_loss_components:
+            self._log_loss_components_to_wandb()
     
     def _log_layer_selection_stats(self):
         """记录层选择统计信息"""
@@ -199,11 +231,12 @@ class AdaptiveLLaVATrainer(Trainer):
         
         # 记录到日志
         if total_selections > 0:
-            logger.info("=== 层选择统计 ===")
+            logger.info("=== 全层LLM训练统计 ===")
+            logger.info(f"总共评估了 {len(layer_counts)} 层")
             for layer_idx in sorted(layer_counts.keys()):
                 frequency = layer_counts[layer_idx] / total_selections * 100
                 logger.info(f"层 {layer_idx}: {frequency:.2f}% ({layer_counts[layer_idx]}/{total_selections})")
-            logger.info("==================")
+            logger.info("======================")
         
         # 清空统计（可选）
         # self.best_layer_selections.clear()
@@ -215,3 +248,26 @@ class AdaptiveLLaVATrainer(Trainer):
         # 定期记录层选择统计
         if self.state.global_step % 100 == 0:
             self._log_layer_selection_stats()
+
+    def _log_loss_components_to_wandb(self):
+        """记录各个损失组件到wandb"""
+        try:
+            import wandb
+            if wandb.run is not None:
+                # 记录损失组件
+                wandb.log({
+                    'train/best_layer_loss': self.current_loss_components['best_layer_loss'],
+                    'train/layer_classifier_loss': self.current_loss_components['layer_classifier_loss'],
+                    'train/moe_load_balancing_loss': self.current_loss_components['moe_load_balancing_loss'],
+                    'train/best_layer_idx': self.current_loss_components['best_layer_idx'],
+                    'train/total_loss_components': self.current_loss_components['total_loss']
+                }, step=self.state.global_step)
+                
+                logger.info(f"Wandb记录损失组件 - 最佳层损失: {self.current_loss_components['best_layer_loss']:.4f}, "
+                          f"层分类器损失: {self.current_loss_components['layer_classifier_loss']:.4f}, "
+                          f"MOE负载均衡损失: {self.current_loss_components['moe_load_balancing_loss']:.4f}, "
+                          f"最佳层索引: {self.current_loss_components['best_layer_idx']}")
+        except ImportError:
+            logger.warning("wandb未安装，无法记录损失组件")
+        except Exception as e:
+            logger.warning(f"记录损失组件到wandb时出错: {e}")
