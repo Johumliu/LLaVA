@@ -818,58 +818,137 @@ def train(attn_implementation=None):
     rank0_print(f"  moe_load_balancing_weight: {training_args.moe_load_balancing_weight}")
     rank0_print(f"======================")
     
+    # 显示完整的命令行参数
+    rank0_print(f"=== 完整的sys.argv ===")
+    rank0_print(f"sys.argv: {sys.argv}")
+    rank0_print(f"======================")
+    
     # 手动检查和设置自适应参数（如果参数解析失败）
     import sys
+    rank0_print(f"检查 --use_adaptive_layer_selection 参数...")
     if '--use_adaptive_layer_selection' in sys.argv:
+        rank0_print("找到 --use_adaptive_layer_selection 参数")
         model_args.use_adaptive_layer_selection = True
         rank0_print("手动设置 use_adaptive_layer_selection = True")
+    else:
+        rank0_print("未找到 --use_adaptive_layer_selection 参数")
     
+    rank0_print(f"检查 --top_k_layers 参数...")
     if '--top_k_layers' in sys.argv:
         try:
             idx = sys.argv.index('--top_k_layers')
+            rank0_print(f"找到 --top_k_layers 参数，位置: {idx}")
             if idx + 1 < len(sys.argv):
-                model_args.top_k_layers = int(sys.argv[idx + 1])
-                rank0_print(f"手动设置 top_k_layers = {model_args.top_k_layers}")
-        except (ValueError, IndexError):
-            pass
+                value = int(sys.argv[idx + 1])
+                model_args.top_k_layers = value
+                rank0_print(f"手动设置 top_k_layers = {value}")
+            else:
+                rank0_print("--top_k_layers 参数后没有值")
+        except (ValueError, IndexError) as e:
+            rank0_print(f"处理 --top_k_layers 参数时出错: {e}")
+    else:
+        rank0_print("未找到 --top_k_layers 参数")
     
+    rank0_print(f"检查 --mm_moe_num_experts 参数...")
     if '--mm_moe_num_experts' in sys.argv:
         try:
             idx = sys.argv.index('--mm_moe_num_experts')
+            rank0_print(f"找到 --mm_moe_num_experts 参数，位置: {idx}")
             if idx + 1 < len(sys.argv):
-                model_args.mm_moe_num_experts = int(sys.argv[idx + 1])
-                rank0_print(f"手动设置 mm_moe_num_experts = {model_args.mm_moe_num_experts}")
-        except (ValueError, IndexError):
-            pass
+                value = int(sys.argv[idx + 1])
+                model_args.mm_moe_num_experts = value
+                rank0_print(f"手动设置 mm_moe_num_experts = {value}")
+            else:
+                rank0_print("--mm_moe_num_experts 参数后没有值")
+        except (ValueError, IndexError) as e:
+            rank0_print(f"处理 --mm_moe_num_experts 参数时出错: {e}")
+    else:
+        rank0_print("未找到 --mm_moe_num_experts 参数")
     
+    rank0_print(f"检查 --mm_moe_top_k 参数...")
     if '--mm_moe_top_k' in sys.argv:
         try:
             idx = sys.argv.index('--mm_moe_top_k')
+            rank0_print(f"找到 --mm_moe_top_k 参数，位置: {idx}")
             if idx + 1 < len(sys.argv):
-                model_args.mm_moe_top_k = int(sys.argv[idx + 1])
-                rank0_print(f"手动设置 mm_moe_top_k = {model_args.mm_moe_top_k}")
-        except (ValueError, IndexError):
-            pass
+                value = int(sys.argv[idx + 1])
+                model_args.mm_moe_top_k = value
+                rank0_print(f"手动设置 mm_moe_top_k = {value}")
+            else:
+                rank0_print("--mm_moe_top_k 参数后没有值")
+        except (ValueError, IndexError) as e:
+            rank0_print(f"处理 --mm_moe_top_k 参数时出错: {e}")
+    else:
+        rank0_print("未找到 --mm_moe_top_k 参数")
     
+    rank0_print(f"检查 --layer_classifier_loss_weight 参数...")
     if '--layer_classifier_loss_weight' in sys.argv:
         try:
             idx = sys.argv.index('--layer_classifier_loss_weight')
+            rank0_print(f"找到 --layer_classifier_loss_weight 参数，位置: {idx}")
             if idx + 1 < len(sys.argv):
-                training_args.layer_classifier_loss_weight = float(sys.argv[idx + 1])
-                rank0_print(f"手动设置 layer_classifier_loss_weight = {training_args.layer_classifier_loss_weight}")
-        except (ValueError, IndexError):
-            pass
+                value = float(sys.argv[idx + 1])
+                training_args.layer_classifier_loss_weight = value
+                rank0_print(f"手动设置 layer_classifier_loss_weight = {value}")
+            else:
+                rank0_print("--layer_classifier_loss_weight 参数后没有值")
+        except (ValueError, IndexError) as e:
+            rank0_print(f"处理 --layer_classifier_loss_weight 参数时出错: {e}")
+    else:
+        rank0_print("未找到 --layer_classifier_loss_weight 参数")
     
+    rank0_print(f"检查 --moe_load_balancing_weight 参数...")
     if '--moe_load_balancing_weight' in sys.argv:
         try:
             idx = sys.argv.index('--moe_load_balancing_weight')
+            rank0_print(f"找到 --moe_load_balancing_weight 参数，位置: {idx}")
             if idx + 1 < len(sys.argv):
-                training_args.moe_load_balancing_weight = float(sys.argv[idx + 1])
-                rank0_print(f"手动设置 moe_load_balancing_weight = {training_args.moe_load_balancing_weight}")
-        except (ValueError, IndexError):
-            pass
+                value = float(sys.argv[idx + 1])
+                training_args.moe_load_balancing_weight = value
+                rank0_print(f"手动设置 moe_load_balancing_weight = {value}")
+            else:
+                rank0_print("--moe_load_balancing_weight 参数后没有值")
+        except (ValueError, IndexError) as e:
+            rank0_print(f"处理 --moe_load_balancing_weight 参数时出错: {e}")
+    else:
+        rank0_print("未找到 --moe_load_balancing_weight 参数")
     
     rank0_print(f"=== 手动设置后的参数 ===")
+    rank0_print(f"  use_adaptive_layer_selection: {model_args.use_adaptive_layer_selection}")
+    rank0_print(f"  top_k_layers: {model_args.top_k_layers}")
+    rank0_print(f"  mm_moe_num_experts: {model_args.mm_moe_num_experts}")
+    rank0_print(f"  mm_moe_top_k: {model_args.mm_moe_top_k}")
+    rank0_print(f"  layer_classifier_loss_weight: {training_args.layer_classifier_loss_weight}")
+    rank0_print(f"  moe_load_balancing_weight: {training_args.moe_load_balancing_weight}")
+    rank0_print(f"======================")
+    
+    # 如果手动设置仍然失败，强制设置关键参数
+    if not model_args.use_adaptive_layer_selection:
+        rank0_print("警告：use_adaptive_layer_selection 仍然为 False，强制设置为 True")
+        model_args.use_adaptive_layer_selection = True
+        
+    # 确保其他参数也有合理的默认值
+    if model_args.top_k_layers <= 0:
+        rank0_print("设置默认值 top_k_layers = 3")
+        model_args.top_k_layers = 3
+        
+    if model_args.mm_moe_num_experts <= 0:
+        rank0_print("设置默认值 mm_moe_num_experts = 8")
+        model_args.mm_moe_num_experts = 8
+        
+    if model_args.mm_moe_top_k <= 0:
+        rank0_print("设置默认值 mm_moe_top_k = 2")
+        model_args.mm_moe_top_k = 2
+        
+    if training_args.layer_classifier_loss_weight <= 0:
+        rank0_print("设置默认值 layer_classifier_loss_weight = 0.1")
+        training_args.layer_classifier_loss_weight = 0.1
+        
+    if training_args.moe_load_balancing_weight <= 0:
+        rank0_print("设置默认值 moe_load_balancing_weight = 0.01")
+        training_args.moe_load_balancing_weight = 0.01
+    
+    rank0_print(f"=== 最终确认的参数 ===")
     rank0_print(f"  use_adaptive_layer_selection: {model_args.use_adaptive_layer_selection}")
     rank0_print(f"  top_k_layers: {model_args.top_k_layers}")
     rank0_print(f"  mm_moe_num_experts: {model_args.mm_moe_num_experts}")
