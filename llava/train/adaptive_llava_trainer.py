@@ -59,11 +59,22 @@ class AdaptiveLLaVATrainer(Trainer):
         # 获取所有层的特征
         all_features = vision_tower.get_all_layer_features(images)
         
+        # 添加特征维度调试信息
+        logger.info(f"获取到 {len(all_features)} 个样本的特征")
+        if all_features:
+            logger.info(f"第一个样本有 {len(all_features[0])} 层")
+            for i, features in enumerate(all_features):
+                if features:
+                    logger.info(f"样本 {i} 第一层特征形状: {features[0].shape}")
+                else:
+                    logger.info(f"样本 {i} 没有特征")
+        
         # 获取文本特征（如果有的话）
         text_features = None
         if hasattr(model, 'get_model') and hasattr(model.get_model(), 'embed_tokens'):
             text_embeddings = model.get_model().embed_tokens(input_ids)
-            text_features = text_features
+            text_features = text_embeddings
+            logger.info(f"文本特征形状: {text_features.shape if text_features is not None else 'None'}")
         
         # 使用第一层特征进行标准前向传播（避免CUDA错误）
         try:
@@ -71,26 +82,42 @@ class AdaptiveLLaVATrainer(Trainer):
             first_layer_features = []
             for features in all_features:
                 if len(features) > 0:
-                    first_layer_features.append(features[0])
+                    # 确保特征维度正确
+                    feature = features[0]
+                    if len(feature.shape) == 3:  # [seq_len, hidden_size]
+                        first_layer_features.append(feature)
+                    elif len(feature.shape) == 2:  # [hidden_size]
+                        # 扩展为 [1, hidden_size]
+                        feature = feature.unsqueeze(0)
+                        first_layer_features.append(feature)
+                    else:
+                        logger.warning(f"意外的特征形状: {feature.shape}")
+                        # 创建默认特征
+                        dummy_feature = torch.zeros(1, vision_tower.hidden_size, 
+                                                 device=next(vision_tower.parameters()).device)
+                        first_layer_features.append(dummy_feature)
                 else:
                     # 如果特征为空，创建一个零张量
                     dummy_feature = torch.zeros(1, vision_tower.hidden_size, 
                                              device=next(vision_tower.parameters()).device)
                     first_layer_features.append(dummy_feature)
             
-            # 临时替换视觉特征
-            original_image_features = getattr(model, '_temp_image_features', None)
-            model._temp_image_features = first_layer_features
+            # 检查特征维度一致性
+            if first_layer_features:
+                expected_shape = first_layer_features[0].shape
+                for i, feature in enumerate(first_layer_features):
+                    if feature.shape != expected_shape:
+                        logger.warning(f"特征 {i} 形状不一致: {feature.shape} vs {expected_shape}")
+                        # 调整形状
+                        if len(feature.shape) == 2 and len(expected_shape) == 3:
+                            first_layer_features[i] = feature.unsqueeze(0)
+                        elif len(feature.shape) == 3 and len(expected_shape) == 2:
+                            first_layer_features[i] = feature.squeeze(0)
             
-            # 前向传播
+            # 使用标准前向传播，不替换特征
+            # 直接使用原始输入，让模型自己处理视觉特征
             outputs = model(**inputs)
             main_loss = outputs.loss
-            
-            # 恢复原始特征
-            if original_image_features is not None:
-                model._temp_image_features = original_image_features
-            else:
-                delattr(model, '_temp_image_features')
                 
         except Exception as e:
             logger.warning(f"计算主要损失时出错: {e}")
@@ -150,7 +177,20 @@ class AdaptiveLLaVATrainer(Trainer):
         classifier_inputs = []
         for features in all_features:
             if len(features) > 0:
-                classifier_inputs.append(features[0])
+                feature = features[0]
+                # 确保特征维度正确
+                if len(feature.shape) == 3:  # [seq_len, hidden_size]
+                    classifier_inputs.append(feature)
+                elif len(feature.shape) == 2:  # [hidden_size]
+                    # 扩展为 [1, hidden_size]
+                    feature = feature.unsqueeze(0)
+                    classifier_inputs.append(feature)
+                else:
+                    logger.warning(f"层分类器中意外的特征形状: {feature.shape}")
+                    # 创建默认特征
+                    dummy_feature = torch.zeros(1, vision_tower.hidden_size, 
+                                             device=next(vision_tower.parameters()).device)
+                    classifier_inputs.append(dummy_feature)
             else:
                 # 如果特征为空，创建一个零张量
                 dummy_feature = torch.zeros(1, vision_tower.hidden_size, 
