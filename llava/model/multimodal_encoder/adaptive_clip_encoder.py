@@ -126,10 +126,18 @@ class AdaptiveCLIPVisionTower(nn.Module):
                 layer_features = []
                 for layer_idx in range(len(image_forward_out.hidden_states)):
                     features = image_forward_out.hidden_states[layer_idx]
+                    logger.debug(f"层 {layer_idx} 原始特征形状: {features.shape}")
                     if self.select_feature == 'patch':
-                        features = features[:, 1:]  # 去掉CLS token
+                        # 安全检查：确保有足够的列来去掉CLS token
+                        if features.shape[1] > 1:
+                            features = features[:, 1:]  # 去掉CLS token
+                            logger.debug(f"层 {layer_idx} 去掉CLS后特征形状: {features.shape}")
+                        else:
+                            # 如果只有1列，保留原样
+                            logger.warning(f"层 {layer_idx} 特征只有1列，无法去掉CLS token")
                     elif self.select_feature == 'cls_patch':
                         features = features  # 保留所有token
+                        logger.debug(f"层 {layer_idx} 保留所有token特征形状: {features.shape}")
                     layer_features.append(features)
                 all_features.append(layer_features)
         else:
@@ -141,11 +149,19 @@ class AdaptiveCLIPVisionTower(nn.Module):
             all_features = []
             for layer_idx in range(len(image_forward_outs.hidden_states)):
                 features = image_forward_outs.hidden_states[layer_idx]
+                logger.debug(f"层 {layer_idx} 原始特征形状: {features.shape}")
                 if self.select_feature == 'patch':
-                    features = features[:, 1:]  # 去掉CLS token
+                    # 安全检查：确保有足够的列来去掉CLS token
+                    if features.shape[1] > 1:
+                        features = features[:, 1:]  # 去掉CLS token
+                        logger.debug(f"层 {layer_idx} 去掉CLS后特征形状: {features.shape}")
+                    else:
+                        # 如果只有1列，保留原样
+                        logger.warning(f"层 {layer_idx} 特征只有1列，无法去掉CLS token")
                 elif self.select_feature == 'cls_patch':
                     features = features  # 保留所有token
-                all_features.append(features)
+                    logger.debug(f"层 {layer_idx} 保留所有token特征形状: {features.shape}")
+                layer_features.append(features)
             all_features = [all_features]  # 保持一致的格式
         
         return all_features

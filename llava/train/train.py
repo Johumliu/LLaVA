@@ -818,11 +818,7 @@ def train(attn_implementation=None):
     rank0_print(f"  moe_load_balancing_weight: {training_args.moe_load_balancing_weight}")
     rank0_print(f"======================")
     
-    # 显示完整的命令行参数
-    rank0_print(f"=== 完整的sys.argv ===")
-    rank0_print(f"sys.argv: {sys.argv}")
-    rank0_print(f"======================")
-    
+
     # 手动检查和设置自适应参数（如果参数解析失败）
     import sys
     rank0_print(f"检查 --use_adaptive_layer_selection 参数...")
