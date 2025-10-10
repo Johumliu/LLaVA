@@ -86,18 +86,20 @@ class AdaptiveCLIPVisionTower(nn.Module):
             else: # 'cls_patch'
                 stacked_features.append(features)
         
-        # -> [batch_size, num_tokens, num_experts, hidden_size]
+        # -> [batch_size, num_experts, num_tokens, hidden_size]
         stacked_features = torch.stack(stacked_features, dim=1)
+        
+        # 在 permute 之前获取正确的维度信息
+        batch_size, _, num_tokens, hidden_size = stacked_features.shape
         
         # -> [batch_size, num_tokens, num_experts, hidden_size]
         stacked_features = stacked_features.permute(0, 2, 1, 3)
 
         # 通过 MoE 融合
-        # MoE 的输出是 [batch_size, num_tokens, hidden_size]
+        # MoE 的输出是 [batch_size * num_tokens, hidden_size]
         fused_features = self.feature_fusion_moe(stacked_features)
         
-        # 恢复形状 -> [batch_size, num_tokens, hidden_size]
-        batch_size, num_experts, num_tokens, hidden_size = stacked_features.shape
+        # 使用之前保存的维度信息来恢复正确的形状
         fused_features = fused_features.reshape(batch_size, num_tokens, hidden_size)
         
         return fused_features
