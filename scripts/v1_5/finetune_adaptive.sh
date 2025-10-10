@@ -38,10 +38,6 @@ deepspeed llava/train/train_mem.py \
     --lazy_preprocess True \
     --report_to wandb \
     \
-    # 自适应层选择参数
-    --use_adaptive_layer_selection True \
-    --top_k_layers 3 \
     --mm_moe_num_experts 8 \
     --mm_moe_top_k 2 \
-    --layer_classifier_loss_weight 0.1 \
     --moe_load_balancing_weight 0.01
