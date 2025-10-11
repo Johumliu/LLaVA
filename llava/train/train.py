@@ -1003,6 +1003,17 @@ def train(attn_implementation=None):
         )
     model.config.use_cache = False
 
+    # 修正 generation_config 中的不一致性
+    if getattr(model.config, "do_sample", False):
+        # 如果启用采样，则无需操作
+        pass
+    else:
+        # 如果关闭采样，则确保 temperature 和 top_p 不会导致冲突
+        if hasattr(model.generation_config, "temperature"):
+            model.generation_config.temperature = 1.0  # 设置为默认值
+        if hasattr(model.generation_config, "top_p"):
+            model.generation_config.top_p = 1.0 # 设置为默认值
+
     if model_args.freeze_backbone:
         model.model.requires_grad_(False)
 
