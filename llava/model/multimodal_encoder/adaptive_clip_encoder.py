@@ -74,7 +74,11 @@ class AdaptiveCLIPVisionTower(nn.Module):
             
             image_features = self.fuse_features(selected_layer_features)
         
-        return image_features
+        # 确保输出的数据类型与输入图像张量的数据类型一致
+        if isinstance(image_features, list):
+            return [feat.to(images[0].dtype) for feat in image_features]
+        else:
+            return image_features.to(images.dtype)
 
     def fuse_features(self, layer_features):
         # 移除 CLS token 并堆叠
