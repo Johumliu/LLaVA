@@ -310,6 +310,9 @@ class CompatibleMoEProjector(nn.Module):
             x: [batch_size, seq_len, input_size] 或 [batch_size, input_size]
             training: 是否处于训练模式
         """
+        # 动态将投影器的数据类型与输入张量x对齐
+        self.to(x.dtype)
+        
         original_shape = x.shape
         if len(original_shape) == 3:
             batch_size, seq_len, input_size = original_shape
