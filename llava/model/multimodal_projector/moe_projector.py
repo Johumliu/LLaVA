@@ -322,8 +322,6 @@ class CompatibleMoEProjector(nn.Module):
             batch_size, input_size = original_shape
             seq_len = 1
         
-        # 强制将 LayerNorm 转换为 bfloat16 类型以匹配输入
-        self.input_norm.to(dtype=torch.bfloat16)
         x_norm = self.input_norm(x)
         
         # 计算门控权重
