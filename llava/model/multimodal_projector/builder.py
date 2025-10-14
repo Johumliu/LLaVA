@@ -63,16 +63,19 @@ def build_vision_projector(config, delay_load=False, **kwargs):
     if projector_type == 'moe':
         num_experts = getattr(config, 'mm_moe_num_experts', 8)
         top_k = getattr(config, 'mm_moe_top_k', 2)
-        return MoEProjector(config, num_experts=num_experts, top_k=top_k)
+        projector = MoEProjector(config, num_experts=num_experts, top_k=top_k)
     
     if projector_type == 'adaptive_moe':
         num_experts = getattr(config, 'mm_moe_num_experts', 8)
         top_k = getattr(config, 'mm_moe_top_k', 2)
-        return AdaptiveMoEProjector(config, num_experts=num_experts, top_k=top_k)
+        projector = AdaptiveMoEProjector(config, num_experts=num_experts, top_k=top_k)
     
     if projector_type == 'compatible_moe':
         num_experts = getattr(config, 'mm_moe_num_experts', 8)
         top_k = getattr(config, 'mm_moe_top_k', 2)
-        return CompatibleMoEProjector(config, num_experts=num_experts, top_k=top_k)
+        projector = CompatibleMoEProjector(config, num_experts=num_experts, top_k=top_k)
 
-    raise ValueError(f'Unknown projector type: {projector_type}')
+    # 确保投影器的数据类型与模型其他部分一致
+    projector.to(dtype=config.torch_dtype)
+
+    return projector
