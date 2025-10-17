@@ -72,6 +72,10 @@ class ModelArguments:
     mm_moe_num_experts: int = field(default=8)
     mm_moe_top_k: int = field(default=2)
 
+    # 新增参数用于多投影器训练
+    mm_vision_layers_to_use: str = field(default=None, metadata={"help": "Comma-separated list of layer indices to use from vision tower."})
+    mm_vision_layers_to_sample: int = field(default=2, metadata={"help": "Number of layers to sample for loss calculation during training."})
+
 
 @dataclass
 class DataArguments:

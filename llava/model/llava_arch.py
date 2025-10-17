@@ -24,6 +24,7 @@ from .multimodal_projector.builder import build_vision_projector
 from llava.constants import IGNORE_INDEX, IMAGE_TOKEN_INDEX, DEFAULT_IMAGE_PATCH_TOKEN, DEFAULT_IM_START_TOKEN, DEFAULT_IM_END_TOKEN
 
 from llava.mm_utils import get_anyres_image_grid_shape
+import random
 
 
 class LlavaMetaModel:
@@ -33,7 +34,12 @@ class LlavaMetaModel:
 
         if hasattr(config, "mm_vision_tower"):
             self.vision_tower = build_vision_tower(config, delay_load=True)
-            self.mm_projector = build_vision_projector(config)
+            
+            # 使用 ModuleList 来管理多个投影器
+            num_projectors = getattr(config, 'num_projectors', 1)
+            self.mm_projector = nn.ModuleList([
+                build_vision_projector(config) for _ in range(num_projectors)
+            ])
 
             if 'unpad' in getattr(config, 'mm_patch_merge_type', ''):
                 self.image_newline = nn.Parameter(
@@ -76,40 +82,22 @@ class LlavaMetaModel:
         self.config.mm_vision_select_feature = mm_vision_select_feature
         self.config.mm_patch_merge_type = mm_patch_merge_type
 
-        if getattr(self, 'mm_projector', None) is None:
-            self.mm_projector = build_vision_projector(self.config)
-
-            if 'unpad' in mm_patch_merge_type:
-                embed_std = 1 / torch.sqrt(torch.tensor(self.config.hidden_size, dtype=self.dtype))
-                self.image_newline = nn.Parameter(
-                    torch.randn(self.config.hidden_size, dtype=self.dtype) * embed_std
-                )
-        else:
-            # In case it is frozen by LoRA
-            for p in self.mm_projector.parameters():
-                p.requires_grad = True
+        # 初始化多个投影器
+        num_layers_to_use = len(getattr(model_args, 'mm_vision_layers_to_use', '-2').split(','))
+        self.config.num_projectors = num_layers_to_use
+        
+        self.mm_projector = nn.ModuleList([
+            build_vision_projector(self.config) for _ in range(num_layers_to_use)
+        ])
 
         if pretrain_mm_mlp_adapter is not None:
             mm_projector_weights = torch.load(pretrain_mm_mlp_adapter, map_location='cpu')
             def get_w(weights, keyword):
                 return {k.split(keyword + '.')[1]: v for k, v in weights.items() if keyword in k}
 
-            # 检查投影器类型，如果是MOE类型，则尝试兼容加载
-            projector_type = getattr(self.config, 'mm_projector_type', 'linear')
-            if 'moe' in projector_type:
-                if hasattr(self.mm_projector, 'load_pretrained_weights'):
-                    # 使用兼容的MOE投影器
-                    pretrained_weights = get_w(mm_projector_weights, 'mm_projector')
-                    self.mm_projector.load_pretrained_weights(pretrained_weights)
-                else:
-                    print(f"Warning: Skipping pretrain weight loading for {projector_type} projector due to structure mismatch")
-                    print("The MOE projector will be initialized with random weights")
-            else:
-                try:
-                    self.mm_projector.load_state_dict(get_w(mm_projector_weights, 'mm_projector'))
-                except Exception as e:
-                    print(f"Warning: Failed to load pretrain weights: {e}")
-                    print("The projector will be initialized with random weights")
+            for i in range(num_layers_to_use):
+                projector_weights = get_w(mm_projector_weights, 'mm_projector')
+                self.mm_projector[i].load_state_dict(projector_weights)
 
 
 def unpad_image(tensor, original_size):
@@ -152,14 +140,16 @@ class LlavaMetaForCausalLM(ABC):
     def get_vision_tower(self):
         return self.get_model().get_vision_tower()
 
-    def encode_images(self, images, text_features=None):
-        vision_tower = self.get_model().get_vision_tower()
-        try:
-            image_features = vision_tower(images, text_features=text_features)
-        except TypeError:
-            image_features = vision_tower(images)
-        image_features = self.get_model().mm_projector(image_features)
-        return image_features
+    def encode_images(self, images):
+        # images 现在是一个特征列表
+        image_features_list = self.get_vision_tower()(images)
+        
+        projected_features_list = []
+        for i, features in enumerate(image_features_list):
+            projected_features = self.get_model().mm_projector[i](features)
+            projected_features_list.append(projected_features)
+            
+        return projected_features_list
 
     def prepare_inputs_labels_for_multimodal(
         self, input_ids, position_ids, attention_mask, past_key_values, labels,
@@ -167,68 +157,59 @@ class LlavaMetaForCausalLM(ABC):
     ):
         vision_tower = self.get_vision_tower()
         if vision_tower is None or images is None or input_ids.shape[1] == 1:
+            if past_key_values is not None and vision_tower is not None and images is not None and input_ids.shape[1] == 1:
+                target_shape = past_key_values[-1][-1].shape[-2] + 1
+                attention_mask = torch.cat((attention_mask, torch.ones(
+                    (attention_mask.shape[0], target_shape - attention_mask.shape[1]),
+                    dtype=attention_mask.dtype,
+                    device=attention_mask.device
+                )), dim=1)
+                position_ids = torch.sum(attention_mask, dim=1).unsqueeze(-1) - 1
             return input_ids, position_ids, attention_mask, past_key_values, None, labels
 
-        # 构造与训练一致的文本特征：将 IMAGE_TOKEN_INDEX 映射为 pad，再过 embed_tokens
-        text_features_for_vision = None
-        try:
-            pad_id = getattr(self.config, 'pad_token_id', 0)
-            safe_input_ids = input_ids.clone()
-            safe_input_ids[safe_input_ids == IMAGE_TOKEN_INDEX] = pad_id
-            text_features_for_vision = self.get_model().embed_tokens(safe_input_ids)
-        except Exception:
-            text_features_for_vision = None
+        # image_features_list 是一个包含了 n 个特征张量的列表
+        image_features_list = self.encode_images(images)
 
-        if type(images) is list or images.ndim == 5:
-            if type(images) is list:
-                images = [x.unsqueeze(0) if x.ndim == 3 else x for x in images]
-            concat_images = torch.cat([image for image in images], dim=0)
-            image_features = self.encode_images(concat_images, text_features=text_features_for_vision)
-            split_sizes = [image.shape[0] for image in images]
-            image_features = torch.split(image_features, split_sizes, dim=0)
-            mm_patch_merge_type = getattr(self.config, 'mm_patch_merge_type', 'flat')
-            image_aspect_ratio = getattr(self.config, 'image_aspect_ratio', 'square')
-            if mm_patch_merge_type == 'flat':
-                image_features = [x.flatten(0, 1) for x in image_features]
-            elif mm_patch_merge_type.startswith('spatial'):
-                new_image_features = []
-                for image_idx, image_feature in enumerate(image_features):
-                    if image_feature.shape[0] > 1:
-                        base_image_feature = image_feature[0]
-                        image_feature = image_feature[1:]
-                        height = width = self.get_vision_tower().num_patches_per_side
-                        assert height * width == base_image_feature.shape[0]
-                        if image_aspect_ratio == 'anyres':
-                            num_patch_width, num_patch_height = get_anyres_image_grid_shape(image_sizes[image_idx], self.config.image_grid_pinpoints, self.get_vision_tower().config.image_size)
-                            image_feature = image_feature.view(num_patch_height, num_patch_width, height, width, -1)
-                        else:
-                            raise NotImplementedError
-                        if 'unpad' in mm_patch_merge_type:
-                            image_feature = image_feature.permute(4, 0, 2, 1, 3).contiguous()
-                            image_feature = image_feature.flatten(1, 2).flatten(2, 3)
-                            image_feature = unpad_image(image_feature, image_sizes[image_idx])
-                            image_feature = torch.cat((
-                                image_feature,
-                                self.model.image_newline[:, None, None].expand(*image_feature.shape[:-1], 1).to(image_feature.device)
-                            ), dim=-1)
-                            image_feature = image_feature.flatten(1, 2).transpose(0, 1)
-                        else:
-                            image_feature = image_feature.permute(0, 2, 1, 3, 4).contiguous()
-                            image_feature = image_feature.flatten(0, 3)
-                        image_feature = torch.cat((base_image_feature, image_feature), dim=0)
-                    else:
-                        image_feature = image_feature[0]
-                        if 'unpad' in mm_patch_merge_type:
-                            image_feature = torch.cat((
-                                image_feature,
-                                self.model.image_newline[None].to(image_feature.device)
-                            ), dim=0)
-                    new_image_features.append(image_feature)
-                image_features = new_image_features
+        # 训练时：随机采样 k 个特征进行处理
+        if self.training:
+            k = getattr(self.config, 'mm_vision_layers_to_sample', 2)
+            
+            # 如果 k 小于总层数，进行采样
+            if k < len(image_features_list):
+                sampled_indices = random.sample(range(len(image_features_list)), k)
+                image_features_list = [image_features_list[i] for i in sampled_indices]
+            # 如果 k 等于或大于总层数，使用所有特征
             else:
-                raise ValueError(f"Unexpected mm_patch_merge_type: {self.config.mm_patch_merge_type}")
+                k = len(image_features_list)
+        # 推理时：只使用最后一个特征（通常是最高层语义特征）
         else:
-            image_features = self.encode_images(images, text_features=text_features_for_vision)
+            image_features_list = [image_features_list[-1]]
+            k = 1
+
+        # 将 input_ids, labels 等沿批次维度复制 k 次
+        # new_batch_size = batch_size * k
+        orig_batch_size = input_ids.shape[0]
+        input_ids = input_ids.repeat(k, 1)
+        if labels is not None:
+            labels = labels.repeat(k, 1)
+        if attention_mask is not None:
+            attention_mask = attention_mask.repeat(k, 1)
+        if position_ids is not None:
+            position_ids = position_ids.repeat(k, 1)
+
+        # 展平 image_features_list, 为每个复制的样本分配一个特征
+        # -> [ (feat_layer1_sample1, feat_layer2_sample1, ...), (feat_layer1_sample2, ...) ]
+        # 我们需要 -> [ feat_layer1_sample1, feat_layer1_sample2, ..., feat_layer2_sample1, ... ]
+        image_features = []
+        for i in range(k): # 遍历采样的层
+             # 提取该层对应的所有批次样本的特征
+            for j in range(orig_batch_size):
+                 # image_features_list 的形状是 [k, batch_size, num_tokens, hidden_size]
+                 # 但当 batch_size=1 时，可能是 [k, num_tokens, hidden_size]
+                 if len(image_features_list[i].shape) == 2:
+                     image_features.append(image_features_list[i])
+                 else:
+                     image_features.append(image_features_list[i][j])
 
         # TODO: image start / end is not implemented here to support pretraining.
         if getattr(self.config, 'tune_mm_mlp_adapter', False) and getattr(self.config, 'mm_use_im_start_end', False):
