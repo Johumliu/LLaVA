@@ -38,7 +38,5 @@ deepspeed llava/train/train_mem.py \
     --dataloader_num_workers 4 \
     --lazy_preprocess True \
     --report_to wandb \
-    \
-    # 多投影器训练参数
     --mm_vision_layers_to_use "6,12,18,23" \
     --mm_vision_layers_to_sample 2
