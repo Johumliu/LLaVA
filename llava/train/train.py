@@ -20,9 +20,10 @@ from dataclasses import dataclass, field
 import json
 import logging
 import pathlib
-from typing import Dict, Optional, Sequence, List
+from typing import Dict, Optional, Sequence, List, Union, Any
 
 import torch
+import torch.nn as nn
 
 import transformers
 import tokenizers
@@ -802,6 +803,44 @@ def make_supervised_data_module(tokenizer: transformers.PreTrainedTokenizer,
                 data_collator=data_collator)
 
 
+class GradientPrintingTrainer(LLaVATrainer):
+    def training_step(self, model: nn.Module, inputs: Dict[str, Union[torch.Tensor, Any]]) -> torch.Tensor:
+        """
+        Perform a training step on a batch of inputs and print projector gradients.
+        """
+        # Call the parent training_step to get the loss and trigger backward()
+        loss = super().training_step(model, inputs)
+
+        # After loss.backward(), gradients are populated.
+        # We can now inspect them.
+        if self.state.global_step % self.args.logging_steps == 0:
+            print(f"\n--- Gradients at Step {self.state.global_step} ---")
+            
+            # Check for multi-projector setup
+            projectors = getattr(model.get_model(), 'mm_projector', None)
+            if isinstance(projectors, nn.ModuleList):
+                for i, projector in enumerate(projectors):
+                    print(f"  Projector {i}:")
+                    for name, param in projector.named_parameters():
+                        if param.grad is not None:
+                            grad_norm = param.grad.norm().item()
+                            print(f"    - {name}: grad_norm = {grad_norm:.4f}")
+                        else:
+                            print(f"    - {name}: grad is None")
+            # Fallback for single projector
+            elif projectors is not None:
+                 print(f"  Single Projector:")
+                 for name, param in projectors.named_parameters():
+                    if param.grad is not None:
+                        grad_norm = param.grad.norm().item()
+                        print(f"    - {name}: grad_norm = {grad_norm:.4f}")
+                    else:
+                        print(f"    - {name}: grad is None")
+            print("--- End of Gradients ---")
+
+        return loss
+
+
 def train(attn_implementation=None):
     global local_rank
 
@@ -1150,7 +1189,7 @@ def train(attn_implementation=None):
                         args=training_args,
                         **data_module)
     else:
-        trainer = LLaVATrainer(model=model,
+        trainer = GradientPrintingTrainer(model=model,
                         tokenizer=tokenizer,
                         args=training_args,
                         **data_module)
