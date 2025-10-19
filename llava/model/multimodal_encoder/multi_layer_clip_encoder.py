@@ -41,8 +41,18 @@ class MultiLayerCLIPVisionTower(nn.Module):
         else:
             image_forward_outs = self.vision_tower(images.to(device=self.device, dtype=self.dtype), output_hidden_states=True)
             image_features = self._process_hidden_states(image_forward_outs.hidden_states)
-        
-        return image_features
+
+        # 确保输出的数据类型与输入图像张量的数据类型一致
+        input_dtype = images.dtype if not isinstance(images, list) else images[0].dtype
+        if isinstance(image_features, list) and len(image_features) > 0 and isinstance(image_features[0], list):
+            # 处理 image_features 是 list of lists 的情况 (当输入是 list of images)
+            casted_features = []
+            for single_image_features in image_features:
+                casted_features.append([feat.to(input_dtype) for feat in single_image_features])
+            return casted_features
+        else:
+            # 处理 image_features 是 list of tensors 的情况
+            return [feat.to(input_dtype) for feat in image_features]
 
     def _process_hidden_states(self, hidden_states):
         """ 从 hidden_states 中提取、处理并返回指定的多层特征 """
@@ -72,10 +82,6 @@ class MultiLayerCLIPVisionTower(nn.Module):
                 
                 output_features.append(feature)
         
-        # 确保输出的数据类型与 vision_tower 的输入期望一致
-        # (通常 vision_tower 是 float32, 但后续流程可能需要其他类型)
-        output_features = [feat.to(self.dtype) for feat in output_features]
-
         return output_features
 
 
