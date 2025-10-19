@@ -111,9 +111,12 @@ def eval_model(args):
                 top_p=args.top_p,
                 num_beams=args.num_beams,
                 max_new_tokens=args.max_new_tokens,
-                use_cache=True)
+                use_cache=True,
+                # 传递新增的参数
+                eval_layer_idx=args.eval_layer_idx)
 
-        outputs = tokenizer.batch_decode(output_ids, skip_special_tokens=True)[0].strip()
+        outputs = tokenizer.batch_decode(output_ids, skip_special_tokens=True)
+        outputs = [output.strip() for output in outputs]
 
         ans_id = shortuuid.uuid()
         ans_file.write(json.dumps({"question_id": idx,
@@ -139,6 +142,10 @@ if __name__ == "__main__":
     parser.add_argument("--top_p", type=float, default=None)
     parser.add_argument("--num_beams", type=int, default=1)
     parser.add_argument("--max_new_tokens", type=int, default=128)
-    args = parser.parse_args()
+    parser.add_argument("--single-pred-prompt", action="store_true")
+    
+    # 新增参数，用于在多投影器模型中选择特定的层进行评估
+    parser.add_argument("--eval-layer-idx", type=int, default=None, help="Index of the vision layer to use for evaluation in multi-projector models.")
 
+    args = parser.parse_args()
     eval_model(args)

@@ -81,9 +81,19 @@ class LlavaMetaModel:
         self.config.mm_vision_select_layer = mm_vision_select_layer
         self.config.mm_vision_select_feature = mm_vision_select_feature
         self.config.mm_patch_merge_type = mm_patch_merge_type
+        
+        # 保存多投影器相关参数到 config
+        if getattr(model_args, 'mm_vision_layers_to_use', None) is not None:
+            self.config.mm_vision_layers_to_use = model_args.mm_vision_layers_to_use
+            self.config.mm_vision_layers_to_sample = model_args.mm_vision_layers_to_sample
 
         # 初始化多个投影器
-        num_layers_to_use = len(getattr(model_args, 'mm_vision_layers_to_use', '-2').split(','))
+        num_layers_to_use_str = getattr(model_args, 'mm_vision_layers_to_use', None)
+        if num_layers_to_use_str:
+            num_layers_to_use = len(num_layers_to_use_str.split(','))
+        else:
+            num_layers_to_use = 1 # 默认为1个投影器
+            
         self.config.num_projectors = num_layers_to_use
         
         self.mm_projector = nn.ModuleList([
@@ -181,9 +191,19 @@ class LlavaMetaForCausalLM(ABC):
             # 如果 k 等于或大于总层数，使用所有特征
             else:
                 k = len(image_features_list)
-        # 推理时：只使用最后一个特征（通常是最高层语义特征）
+        # 推理时：根据 eval_layer_idx 选择特征，否则默认使用最后一个
         else:
-            image_features_list = [image_features_list[-1]]
+            eval_layer_idx = getattr(self.config, 'eval_layer_idx', -1)
+            
+            if eval_layer_idx is None or eval_layer_idx == -1:
+                # 默认行为：使用最后一个特征
+                image_features_list = [image_features_list[-1]]
+            else:
+                # 使用指定的层
+                if 0 <= eval_layer_idx < len(image_features_list):
+                    image_features_list = [image_features_list[eval_layer_idx]]
+                else:
+                    raise ValueError(f"eval_layer_idx {eval_layer_idx} is out of range. Available layers: {len(image_features_list)}")
             k = 1
 
         # 将 input_ids, labels 等沿批次维度复制 k 次

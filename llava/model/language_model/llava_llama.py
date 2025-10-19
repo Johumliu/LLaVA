@@ -68,7 +68,20 @@ class LlavaLlamaForCausalLM(LlamaForCausalLM, LlavaMetaForCausalLM):
         images: Optional[torch.FloatTensor] = None,
         image_sizes: Optional[List[List[int]]] = None,
         return_dict: Optional[bool] = None,
+        # 新增 eval_layer_idx 参数
+        eval_layer_idx: Optional[int] = None,
     ) -> Union[Tuple, CausalLMOutputWithPast]:
+
+        # 将 eval_layer_idx 保存到 config 中，以便 llava_arch.py 可以访问
+        if eval_layer_idx is not None:
+            self.config.eval_layer_idx = eval_layer_idx
+        else:
+            # 确保在没有传递时，config 中没有旧的值
+            if hasattr(self.config, 'eval_layer_idx'):
+                del self.config.eval_layer_idx
+
+        # 辅助损失，确保所有投影器参数在每个step中都被使用
+        aux_loss = 0.0
 
         if inputs_embeds is None:
             (
@@ -141,18 +154,12 @@ class LlavaLlamaForCausalLM(LlamaForCausalLM, LlavaMetaForCausalLM):
             **kwargs
         )
 
-    def prepare_inputs_for_generation(self, input_ids, past_key_values=None,
-                                      inputs_embeds=None, **kwargs):
-        images = kwargs.pop("images", None)
-        image_sizes = kwargs.pop("image_sizes", None)
-        inputs = super().prepare_inputs_for_generation(
-            input_ids, past_key_values=past_key_values, inputs_embeds=inputs_embeds, **kwargs
-        )
-        if images is not None:
-            inputs['images'] = images
-        if image_sizes is not None:
-            inputs['image_sizes'] = image_sizes
-        return inputs
+    def prepare_inputs_for_generation(self, input_ids, past_key_values=None, attention_mask=None, inputs_embeds=None, **kwargs):
+        model_kwargs = super().prepare_inputs_for_generation(input_ids, past_key_values=past_key_values, attention_mask=attention_mask, inputs_embeds=inputs_embeds, **kwargs)
+        # 将 eval_layer_idx 传递给 forward 方法
+        if 'eval_layer_idx' in kwargs:
+            model_kwargs['eval_layer_idx'] = kwargs['eval_layer_idx']
+        return model_kwargs
 
 AutoConfig.register("llava_llama", LlavaConfig)
 AutoModelForCausalLM.register(LlavaConfig, LlavaLlamaForCausalLM)
