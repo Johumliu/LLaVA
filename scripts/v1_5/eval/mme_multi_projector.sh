@@ -16,7 +16,7 @@ CKPT_NAME=$(basename "${MODEL_PATH}")
 EXP_NAME="${CKPT_NAME}_layer_${EVAL_LAYER_IDX}"
 
 MME_QA_FILE=${DATA_ROOT}/eval/MME/llava_mme.jsonl
-MME_IMAGE_DIR=${DATA_ROOT}/eval/MME/MME_Benchmark_release_version
+MME_IMAGE_DIR=${DATA_ROOT}/eval/MME/MME_Benchmark_release_version/MME_Benchmark
 ANSWERS_DIR=${DATA_ROOT}/eval/MME/answers
 ANSWERS_FILE=${ANSWERS_DIR}/${EXP_NAME}.jsonl
 
