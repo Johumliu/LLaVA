@@ -119,8 +119,9 @@ def eval_model(args):
                 # 传递新增的参数
                 eval_layer_idx=args.eval_layer_idx)
 
-        outputs = tokenizer.batch_decode(output_ids, skip_special_tokens=True)
-        outputs = [output.strip() for output in outputs]
+        input_token_len = input_ids.shape[1]
+        outputs = tokenizer.batch_decode(output_ids[:, input_token_len:], skip_special_tokens=True)[0]
+        outputs = outputs.strip()
 
         ans_id = shortuuid.uuid()
         ans_file.write(json.dumps({"question_id": idx,
