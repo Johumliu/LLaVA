@@ -84,12 +84,7 @@ def eval_model(args):
     tokenizer, model, image_processor, context_len = load_pretrained_model(
         model_path, 
         args.model_base, 
-        model_name, 
-        args.load_8bit, 
-        args.load_4bit, 
-        device="cuda",
-        # 显式传递多层配置，以覆盖不完整的 config.json
-        mm_vision_layers_to_use=args.mm_vision_layers_to_use
+        model_name
     )
 
     questions = [json.loads(q) for q in open(os.path.expanduser(args.question_file), "r")]
@@ -155,8 +150,6 @@ if __name__ == "__main__":
     
     # 新增参数，用于在多投影器模型中选择特定的层进行评估
     parser.add_argument("--eval-layer-idx", type=int, default=None, help="Index of the vision layer to use for evaluation in multi-projector models.")
-    # 新增参数，用于在评估时手动指定多层配置 (用于修复旧模型)
-    parser.add_argument("--mm_vision_layers_to_use", type=str, default=None, help="Manually specify vision layers to use for multi-projector models if not in config.")
 
     args = parser.parse_args()
     eval_model(args)

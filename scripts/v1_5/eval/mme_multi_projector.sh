@@ -31,8 +31,7 @@ python -m llava.eval.model_vqa_loader \
     --answers-file "${ANSWERS_FILE}" \
     --temperature 0 \
     --conv-mode vicuna_v1 \
-    --eval-layer-idx ${EVAL_LAYER_IDX} \
-    --mm_vision_layers_to_use "6,12,18,23"
+    --eval-layer-idx ${EVAL_LAYER_IDX}
 
 # 转换答案为MME官方评测输入格式
 (
