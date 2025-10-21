@@ -9,6 +9,12 @@ from llava.model.builder import load_pretrained_model
 from llava.utils import disable_torch_init
 from llava.mm_utils import tokenizer_image_token, process_images, get_model_name_from_path
 from PIL import Image
+import math
+
+def get_chunk(lst, n, k):
+    """将列表分割成 n 个大致相等的块，并返回第 k 个块"""
+    chunks = [lst[i::n] for i in range(n)]
+    return chunks[k]
 
 def predict_model(args):
     disable_torch_init()
@@ -30,6 +36,10 @@ def predict_model(args):
 
     input_data = json.load(open(os.path.expanduser(args.input_json), "r"))
     
+    # 根据 chunk 参数分割数据
+    if args.num_chunks > 1:
+        input_data = get_chunk(input_data, args.num_chunks, args.chunk_idx)
+
     # 外层循环：遍历要预测的每一个层
     for layer_idx, layer_num in enumerate(tqdm(layers_to_predict, desc="Processing Layers")):
         
@@ -112,9 +122,17 @@ def predict_model(args):
                 original_item['conversations'].append(new_turn)
 
     # 所有层处理完毕后，保存最终结果
-    with open(os.path.expanduser(args.output_json), "w") as f:
+    output_dir = os.path.dirname(os.path.expanduser(args.output_json))
+    os.makedirs(output_dir, exist_ok=True)
+    
+    # 修改输出文件名以包含 chunk 索引
+    base_name, ext = os.path.splitext(os.path.basename(args.output_json))
+    chunk_output_filename = f"{base_name}_chunk{args.chunk_idx}{ext}"
+    chunk_output_path = os.path.join(output_dir, chunk_output_filename)
+
+    with open(chunk_output_path, "w") as f:
         json.dump(input_data, f, indent=2)
-    print(f"Prediction finished. Results are saved to {args.output_json}")
+    print(f"Prediction for chunk {args.chunk_idx} finished. Results are saved to {chunk_output_path}")
 
 
 if __name__ == "__main__":
@@ -127,6 +145,9 @@ if __name__ == "__main__":
     parser.add_argument("--mm-vision-layers-to-use", type=str, required=True, help="Comma-separated list of vision layer numbers to use for prediction, e.g., '6,12,18,23'")
     parser.add_argument("--conv-mode", type=str, default="vicuna_v1")
     parser.add_argument("--batch-size", type=int, default=8, help="Batch size for prediction.")
+    # 新增用于分布式预测的参数
+    parser.add_argument("--num-chunks", type=int, default=1)
+    parser.add_argument("--chunk-idx", type=int, default=0)
     parser.add_argument("--temperature", type=float, default=0.2)
     parser.add_argument("--top_p", type=float, default=None)
     parser.add_argument("--num_beams", type=int, default=1)
