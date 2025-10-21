@@ -79,7 +79,7 @@ def eval_model(args):
                 temperature=args.temperature,
                 max_new_tokens=1024,
                 use_cache=True,
-            )
+                eval_layer_idx=args.eval_layer_idx)
 
         outputs = tokenizer.batch_decode(output_ids, skip_special_tokens=True)[0].strip()
 
@@ -106,6 +106,8 @@ if __name__ == "__main__":
     parser.add_argument("--temperature", type=float, default=0.2)
     parser.add_argument("--answer-prompter", action="store_true")
     parser.add_argument("--single-pred-prompt", action="store_true")
+    # 新增参数，用于在多投影器模型中选择特定的层进行评估
+    parser.add_argument("--eval-layer-idx", type=int, default=None, help="Index of the vision layer to use for evaluation in multi-projector models.")
     args = parser.parse_args()
 
     eval_model(args)
