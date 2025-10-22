@@ -10,6 +10,7 @@ from llava.utils import disable_torch_init
 from llava.mm_utils import tokenizer_image_token, process_images, get_model_name_from_path
 from PIL import Image
 import math
+import random
 
 def get_chunk(lst, n, k):
     """将列表分割成 n 个大致相等的块，并返回第 k 个块"""
@@ -36,6 +37,14 @@ def predict_model(args):
 
     input_data = json.load(open(os.path.expanduser(args.input_json), "r"))
     
+    # --- 修改：随机采样十分之一的数据 ---
+    subset_size = len(input_data) // 10
+    random.seed(42) # for reproducibility
+    random.shuffle(input_data)
+    input_data = input_data[:subset_size]
+    print(f"Running prediction on a random subset of the data: {len(input_data)} items.")
+    # -----------------------------------------
+
     # 1. 将数据扁平化为独立的预测任务
     tasks = []
     for item_idx, item in enumerate(input_data):
@@ -70,15 +79,29 @@ def predict_model(args):
                 image_file = item["image"]
                 image = Image.open(os.path.join(args.image_folder, image_file)).convert('RGB')
                 
-                # 构建包含历史记录的对话
+                # --- 修改：构建独立的、无上下文的对话 ---
                 conv = conv_templates[args.conv_mode].copy()
-                for turn in item['conversations'][:turn_idx + 1]:
-                    role = conv.roles[0 if turn['from'] == 'human' else 1]
-                    # 将 <image> 替换为 LLaVA 的默认图像 token
-                    message = turn['value'].replace('<image>\n', DEFAULT_IMAGE_TOKEN + '\n')
-                    conv.append_message(role, message)
+                # 获取当前正在处理的人类提问
+                question = item['conversations'][turn_idx]['value']
+                
+                # 确保问题中的 <image> 占位符被正确替换
+                if '<image>' not in question:
+                    # 如果用户的问题中没有 <image>，我们在开头添加
+                    if model.config.mm_use_im_start_end:
+                         question = DEFAULT_IM_START_TOKEN + DEFAULT_IMAGE_TOKEN + DEFAULT_IM_END_TOKEN + '\n' + question
+                    else:
+                         question = DEFAULT_IMAGE_TOKEN + '\n' + question
+                else:
+                    # 如果用户问题中已有 <image>，我们只替换它
+                    if model.config.mm_use_im_start_end:
+                        question = question.replace('<image>\n', DEFAULT_IM_START_TOKEN + DEFAULT_IMAGE_TOKEN + DEFAULT_IM_END_TOKEN + '\n')
+                    else:
+                        question = question.replace('<image>\n', DEFAULT_IMAGE_TOKEN + '\n')
+                
+                conv.append_message(conv.roles[0], question)
                 conv.append_message(conv.roles[1], None)
                 prompt = conv.get_prompt()
+                # -----------------------------------------
                 
                 batch_images.append(image)
                 batch_image_sizes.append(image.size)
