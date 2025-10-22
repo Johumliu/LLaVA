@@ -37,8 +37,8 @@ def predict_model(args):
 
     input_data = json.load(open(os.path.expanduser(args.input_json), "r"))
     
-    # --- 修改：随机采样十分之一的数据 ---
-    subset_size = len(input_data) // 10
+    # --- 修改：随机采样百分之一的数据 ---
+    subset_size = len(input_data) // 100
     random.seed(42) # for reproducibility
     random.shuffle(input_data)
     input_data = input_data[:subset_size]
