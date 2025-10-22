@@ -36,50 +36,58 @@ def predict_model(args):
 
     input_data = json.load(open(os.path.expanduser(args.input_json), "r"))
     
-    # 根据 chunk 参数分割数据
-    if args.num_chunks > 1:
-        input_data = get_chunk(input_data, args.num_chunks, args.chunk_idx)
+    # 1. 将数据扁平化为独立的预测任务
+    tasks = []
+    for item_idx, item in enumerate(input_data):
+        if not item.get("image") or not item.get("conversations"):
+            continue
+        
+        # 找到所有 "human" 回合的索引
+        human_turn_indices = [i for i, turn in enumerate(item['conversations']) if turn['from'] == 'human']
+        
+        for turn_idx in human_turn_indices:
+            tasks.append({'item_idx': item_idx, 'turn_idx': turn_idx})
 
-    # 外层循环：遍历要预测的每一个层
+    # 用于存储所有新生成的回合
+    all_new_turns = [[] for _ in range(len(input_data))]
+
+    # 2. 外层循环：遍历要预测的每一个层
     for layer_idx, layer_num in enumerate(tqdm(layers_to_predict, desc="Processing Layers")):
         
-        # 内层循环：按批次处理数据
-        for i in tqdm(range(0, len(input_data), args.batch_size), desc=f"Layer {layer_num} Batches", leave=False):
-            batch_slice = slice(i, i + args.batch_size)
-            batch_data = input_data[batch_slice]
+        # 3. 内层循环：按批次处理“任务”
+        for i in tqdm(range(0, len(tasks), args.batch_size), desc=f"Layer {layer_num} Batches", leave=False):
+            batch_tasks = tasks[i : i + args.batch_size]
 
             batch_images = []
             batch_prompts = []
             batch_image_sizes = []
             
-            # 1. 准备一个批次的数据
-            for item in batch_data:
-                image_file = item.get("image")
-                if not image_file or not os.path.exists(os.path.join(args.image_folder, image_file)):
-                    # 跳过没有有效图片的项
-                    continue
+            # 准备一个批次的数据
+            for task in batch_tasks:
+                item = input_data[task['item_idx']]
+                turn_idx = task['turn_idx']
                 
+                image_file = item["image"]
                 image = Image.open(os.path.join(args.image_folder, image_file)).convert('RGB')
                 
-                qs = item['conversations'][0]['value'].replace('<image>\n', '').replace('\n<image>', '').strip()
-                
+                # 构建包含历史记录的对话
                 conv = conv_templates[args.conv_mode].copy()
-                if model.config.mm_use_im_start_end:
-                    qs_with_image = DEFAULT_IM_START_TOKEN + DEFAULT_IMAGE_TOKEN + DEFAULT_IM_END_TOKEN + '\n' + qs
-                else:
-                    qs_with_image = DEFAULT_IMAGE_TOKEN + '\n' + qs
-                
-                conv.append_message(conv.roles[0], qs_with_image)
+                for turn in item['conversations'][:turn_idx + 1]:
+                    role = conv.roles[0 if turn['from'] == 'human' else 1]
+                    # 将 <image> 替换为 LLaVA 的默认图像 token
+                    message = turn['value'].replace('<image>\n', DEFAULT_IMAGE_TOKEN + '\n')
+                    conv.append_message(role, message)
                 conv.append_message(conv.roles[1], None)
+                prompt = conv.get_prompt()
                 
                 batch_images.append(image)
                 batch_image_sizes.append(image.size)
-                batch_prompts.append(conv.get_prompt())
+                batch_prompts.append(prompt)
 
             if not batch_images:
                 continue
 
-            # 2. 批量处理图片和文本
+            # 批量处理图片和文本
             image_tensors = process_images(batch_images, image_processor, model.config)
             input_ids = [tokenizer_image_token(prompt, tokenizer, IMAGE_TOKEN_INDEX, return_tensors='pt') for prompt in batch_prompts]
             
@@ -88,7 +96,7 @@ def predict_model(args):
             for j, ids in enumerate(input_ids):
                 batch_input_ids[j, max_len - len(ids):] = ids
 
-            # 3. 批量生成预测
+            # 批量生成预测
             with torch.inference_mode():
                 batch_output_ids = model.generate(
                     batch_input_ids.cuda(),
@@ -100,39 +108,40 @@ def predict_model(args):
                     num_beams=args.num_beams,
                     max_new_tokens=args.max_new_tokens,
                     use_cache=True,
-                    eval_layer_idx=layer_idx  # 使用 projector 的索引
+                    eval_layer_idx=layer_idx
                 )
 
-            # 4. 批量解码并将结果存回
+            # 批量解码并将结果存回
             batch_full_outputs = tokenizer.batch_decode(batch_output_ids, skip_special_tokens=True)
 
             for j, full_output in enumerate(batch_full_outputs):
                 full_output = full_output.strip()
                 
+                task = batch_tasks[j]
+                item_idx = task['item_idx']
+                question_index = task['turn_idx'] // 2 # 计算这是第几个问题 (0-indexed)
+
+                # 从完整输出中分离出答案
+                # (注意：这里的 conv 是上一个循环的最后一个，但 sep 应该是通用的)
                 conv = conv_templates[args.conv_mode].copy()
                 sep = conv.sep if conv.sep_style != SeparatorStyle.TWO else conv.sep2
                 parts = full_output.rsplit(sep, 1)
                 answer = parts[1].strip() if len(parts) == 2 else full_output
-
-                original_item = batch_data[j]
+                
                 new_turn = {
-                    "from": f"output_layer_{layer_num}",
+                    "from": f"output_layer_{layer_num}_q{question_index}",
                     "value": answer
                 }
-                original_item['conversations'].append(new_turn)
+                all_new_turns[item_idx].append(new_turn)
 
-    # 所有层处理完毕后，保存最终结果
-    output_dir = os.path.dirname(os.path.expanduser(args.output_json))
-    os.makedirs(output_dir, exist_ok=True)
-    
-    # 修改输出文件名以包含 chunk 索引
-    base_name, ext = os.path.splitext(os.path.basename(args.output_json))
-    chunk_output_filename = f"{base_name}_chunk{args.chunk_idx}{ext}"
-    chunk_output_path = os.path.join(output_dir, chunk_output_filename)
+    # 4. 所有层处理完毕后，将新生成的回合追加到原始数据中
+    for item_idx, item in enumerate(input_data):
+        item['conversations'].extend(all_new_turns[item_idx])
 
-    with open(chunk_output_path, "w") as f:
+    # 5. 保存最终结果
+    with open(os.path.expanduser(args.output_json), "w") as f:
         json.dump(input_data, f, indent=2)
-    print(f"Prediction for chunk {args.chunk_idx} finished. Results are saved to {chunk_output_path}")
+    print(f"Prediction finished. Results are saved to {args.output_json}")
 
 
 if __name__ == "__main__":
