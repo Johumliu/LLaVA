@@ -29,8 +29,8 @@ import numpy as np
 from transformers import (
     CLIPVisionModel,
     CLIPImageProcessor,
-    AutoModel,
-    AutoTokenizer,
+    CLIPTextModel,
+    CLIPTokenizer,
 )
 from sklearn.metrics import classification_report, accuracy_score, confusion_matrix
 
@@ -46,7 +46,6 @@ LABELS_JSON_PATH = "playground/data/router_labels.json"
 
 # Model paths
 CLIP_MODEL_NAME = "openai/clip-vit-large-patch14-336"
-BERT_MODEL_NAME = "prajjwal1/bert-tiny"
 
 # Training hyperparameters
 BATCH_SIZE = 32
@@ -112,21 +111,21 @@ class RouterDataset(Dataset):
         data: List[Dict],
         image_root: str,
         clip_processor: CLIPImageProcessor,
-        bert_tokenizer: AutoTokenizer,
-        max_text_length: int = 64
+        clip_tokenizer: CLIPTokenizer,
+        max_text_length: int = 77  # CLIP default max length
     ):
         """
         Args:
             data: List of dictionaries containing image path, question, and target_layer
             image_root: Root directory for images
             clip_processor: CLIP image processor for preprocessing
-            bert_tokenizer: BERT tokenizer for text processing
-            max_text_length: Maximum length for text tokenization
+            clip_tokenizer: CLIP tokenizer for text processing
+            max_text_length: Maximum length for text tokenization (CLIP default: 77)
         """
         self.data = data
         self.image_root = image_root
         self.clip_processor = clip_processor
-        self.bert_tokenizer = bert_tokenizer
+        self.clip_tokenizer = clip_tokenizer
         self.max_text_length = max_text_length
         
     def __len__(self) -> int:
@@ -148,8 +147,8 @@ class RouterDataset(Dataset):
             # Return a black image as fallback
             pixel_values = torch.zeros(3, 336, 336)
         
-        # Tokenize question
-        text_encoding = self.bert_tokenizer(
+        # Tokenize question using CLIP tokenizer
+        text_encoding = self.clip_tokenizer(
             item["question"],
             padding="max_length",
             truncation=True,
@@ -195,21 +194,25 @@ class VisionBranchEarlyExit(nn.Module):
         print(f"  - Number of layers: {self.vision_model.config.num_hidden_layers}")
         print(f"  - All parameters frozen (not trainable)")
         
-    def forward(self, pixel_values: torch.Tensor) -> torch.Tensor:
+    def forward(self, pixel_values: torch.Tensor, return_patches: bool = True) -> torch.Tensor:
         """
         Forward pass with early exit at layer 6.
         
         Args:
             pixel_values: Input images [batch_size, 3, 336, 336]
+            return_patches: If True, return all patch tokens [B, 577, D].
+                          If False, return only CLS token [B, D].
             
         Returns:
-            features: Vision features from layer 6 [batch_size, hidden_size]
+            features: Vision features from layer 6
+                     - If return_patches=True: [batch_size, 577, hidden_size]
+                     - If return_patches=False: [batch_size, hidden_size]
         """
         # Get the vision transformer encoder
         vision_encoder = self.vision_model.vision_model
         
         # Step 1: Patch embedding
-        # [batch_size, num_patches + 1, hidden_size]
+        # [batch_size, num_patches + 1, hidden_size] = [B, 577, 1024]
         hidden_states = vision_encoder.embeddings(pixel_values)
         
         # Step 2: Pre-layer norm (if exists)
@@ -225,31 +228,43 @@ class VisionBranchEarlyExit(nn.Module):
                 output_attentions=False
             )[0]
         
-        # Step 4: Extract CLS token (first token) as the global representation
-        # [batch_size, hidden_size]
-        cls_features = hidden_states[:, 0, :]
-        
-        return cls_features
+        # Step 4: Return features based on return_patches flag
+        if return_patches:
+            # Return all patch tokens (including CLS) for Cross-Attention
+            # [batch_size, 577, hidden_size]
+            return hidden_states
+        else:
+            # Return only CLS token (first token) as the global representation
+            # [batch_size, hidden_size]
+            return hidden_states[:, 0, :]
 
 
 class TextBranch(nn.Module):
     """
-    Text branch using lightweight BERT-tiny model.
-    Extracts [CLS] token representation for the question.
+    Text branch using CLIP Text Encoder.
+    
+    Using CLIP's text encoder instead of BERT-tiny ensures that the text
+    features are naturally aligned with CLIP's vision features, making
+    the router's decision easier to learn.
     """
     
-    def __init__(self, bert_model_name: str):
+    def __init__(self, clip_model_name: str):
         super().__init__()
         
-        # Load BERT-tiny model
-        self.bert_model = AutoModel.from_pretrained(bert_model_name)
+        # Load CLIP Text Encoder (same model as Vision Encoder)
+        self.text_model = CLIPTextModel.from_pretrained(clip_model_name)
+        
+        # Freeze all parameters - backbone should not be trained
+        for param in self.text_model.parameters():
+            param.requires_grad = False
         
         # Get the hidden size from config
-        self.hidden_size = self.bert_model.config.hidden_size  # 128 for bert-tiny
+        self.hidden_size = self.text_model.config.hidden_size  # 768 for CLIP-L
         
-        print(f"Loaded BERT Model: {bert_model_name}")
+        print(f"Loaded CLIP Text Model: {clip_model_name}")
         print(f"  - Hidden size: {self.hidden_size}")
-        print(f"  - Number of layers: {self.bert_model.config.num_hidden_layers}")
+        print(f"  - Number of layers: {self.text_model.config.num_hidden_layers}")
+        print(f"  - All parameters frozen (not trainable)")
         
     def forward(
         self, 
@@ -257,25 +272,26 @@ class TextBranch(nn.Module):
         attention_mask: torch.Tensor
     ) -> torch.Tensor:
         """
-        Forward pass to extract [CLS] token features.
+        Forward pass to extract text features.
         
         Args:
             input_ids: Tokenized input [batch_size, seq_len]
             attention_mask: Attention mask [batch_size, seq_len]
             
         Returns:
-            features: Text features from [CLS] token [batch_size, hidden_size]
+            features: Text features from pooler output [batch_size, hidden_size]
         """
-        outputs = self.bert_model(
+        outputs = self.text_model(
             input_ids=input_ids,
             attention_mask=attention_mask,
             return_dict=True
         )
         
-        # Extract [CLS] token (first token of the sequence)
-        cls_features = outputs.last_hidden_state[:, 0, :]
+        # Use pooler_output which is the [EOS] token representation
+        # projected by a linear layer, representing the whole sentence
+        pooled_output = outputs.pooler_output
         
-        return cls_features
+        return pooled_output
 
 
 class QueryAwareRouter(nn.Module):
@@ -287,30 +303,37 @@ class QueryAwareRouter(nn.Module):
     generating the response.
     
     Architecture:
-    - Vision Branch: CLIP ViT (frozen, early exit at layer 6)
-    - Text Branch: BERT-tiny (trainable)
-    - Fusion: Project to same dimension, concatenate, MLP classifier
+    - Vision Branch: CLIP ViT (frozen, early exit at layer 6) -> returns Patch Tokens
+    - Text Branch: CLIP Text Encoder (frozen) -> returns [EOS] token
+    - Fusion: Cross-Attention (Text queries Image patches) -> MLP classifier
+    
+    The Cross-Attention mechanism allows the text query to attend to relevant
+    image patches, enabling the router to make spatially-aware decisions:
+    - If the question asks about details (e.g., "what text?"), attention focuses
+      on specific patches, and router can confidently choose earlier layers.
+    - If the question asks about semantics (e.g., "why?"), attention spreads
+      across patches, indicating deeper layers are needed.
     """
     
     def __init__(
         self,
         clip_model_name: str = CLIP_MODEL_NAME,
-        bert_model_name: str = BERT_MODEL_NAME,
         hidden_dim: int = HIDDEN_DIM,
         num_classes: int = NUM_CLASSES,
-        dropout_rate: float = 0.1
+        dropout_rate: float = 0.1,
+        num_attention_heads: int = 4
     ):
         super().__init__()
         
         print("=" * 60)
-        print("Initializing Query-Aware Router")
+        print("Initializing Query-Aware Router (Cross-Attention Architecture)")
         print("=" * 60)
         
-        # Vision branch (frozen, early exit)
+        # Vision branch (frozen, early exit) - returns patch tokens
         self.vision_branch = VisionBranchEarlyExit(clip_model_name)
         
-        # Text branch (trainable)
-        self.text_branch = TextBranch(bert_model_name)
+        # Text branch (CLIP Text Encoder, frozen)
+        self.text_branch = TextBranch(clip_model_name)
         
         # Projection layers to map features to the same dimension
         self.vision_projector = nn.Sequential(
@@ -327,10 +350,18 @@ class QueryAwareRouter(nn.Module):
             nn.Dropout(dropout_rate)
         )
         
-        # Fusion and classification head
-        # Input: concatenated vision (hidden_dim) + text (hidden_dim) = 2 * hidden_dim
+        # Cross-Attention module: Text (Query) attends to Image Patches (Key/Value)
+        self.cross_attn = nn.MultiheadAttention(
+            embed_dim=hidden_dim,
+            num_heads=num_attention_heads,
+            batch_first=True,
+            dropout=dropout_rate
+        )
+        self.attn_norm = nn.LayerNorm(hidden_dim)
+        
+        # Classification head (simpler now since cross-attention does the fusion)
         self.classifier = nn.Sequential(
-            nn.Linear(hidden_dim * 2, hidden_dim),
+            nn.Linear(hidden_dim, hidden_dim),
             nn.LayerNorm(hidden_dim),
             nn.GELU(),
             nn.Dropout(dropout_rate),
@@ -341,10 +372,11 @@ class QueryAwareRouter(nn.Module):
             nn.Linear(hidden_dim // 2, num_classes)
         )
         
-        print(f"\nProjection dimensions:")
-        print(f"  - Vision: {self.vision_branch.hidden_size} -> {hidden_dim}")
-        print(f"  - Text: {self.text_branch.hidden_size} -> {hidden_dim}")
-        print(f"  - Fusion: {hidden_dim * 2} -> {num_classes}")
+        print(f"\nArchitecture details:")
+        print(f"  - Vision: {self.vision_branch.hidden_size} -> {hidden_dim} (Patch Tokens)")
+        print(f"  - Text: {self.text_branch.hidden_size} -> {hidden_dim} (Query)")
+        print(f"  - Cross-Attention: {num_attention_heads} heads, dim={hidden_dim}")
+        print(f"  - Classifier: {hidden_dim} -> {num_classes}")
         print("=" * 60)
         
     def forward(
@@ -354,7 +386,7 @@ class QueryAwareRouter(nn.Module):
         attention_mask: torch.Tensor
     ) -> torch.Tensor:
         """
-        Forward pass of the router.
+        Forward pass of the router with Cross-Attention.
         
         Args:
             pixel_values: Input images [batch_size, 3, 336, 336]
@@ -364,19 +396,35 @@ class QueryAwareRouter(nn.Module):
         Returns:
             logits: Classification logits [batch_size, num_classes]
         """
-        # Extract vision features (frozen, early exit at layer 6)
+        # 1. Vision branch: Get Patch Features [B, 577, 1024] (CLS + 576 Patches)
         with torch.no_grad():
-            vision_features = self.vision_branch(pixel_values)
+            vision_features = self.vision_branch(pixel_values, return_patches=True)
         
-        # Extract text features
-        text_features = self.text_branch(input_ids, attention_mask)
+        # 2. Text branch: Get pooled text features [B, 768]
+        with torch.no_grad():
+            text_features = self.text_branch(input_ids, attention_mask)
         
-        # Project to common dimension
+        # 3. Project to common dimension
+        # Vision: [B, 577, 1024] -> [B, 577, hidden_dim]
         vision_projected = self.vision_projector(vision_features)
-        text_projected = self.text_projector(text_features)
+        # Text: [B, 768] -> [B, 1, hidden_dim] (add sequence dimension for attention)
+        text_projected = self.text_projector(text_features).unsqueeze(1)
         
-        # Concatenate and classify
-        fused_features = torch.cat([vision_projected, text_projected], dim=-1)
+        # 4. Cross-Attention: Text (Query) attends to Image Patches (Key/Value)
+        # This allows the model to focus on relevant image regions based on the question
+        # Query: [B, 1, hidden_dim], Key/Value: [B, 577, hidden_dim]
+        attn_output, attn_weights = self.cross_attn(
+            query=text_projected,
+            key=vision_projected,
+            value=vision_projected
+        )
+        # attn_output: [B, 1, hidden_dim]
+        
+        # 5. Apply layer norm and squeeze
+        attn_output = self.attn_norm(attn_output)
+        fused_features = attn_output.squeeze(1)  # [B, hidden_dim]
+        
+        # 6. Classify
         logits = self.classifier(fused_features)
         
         return logits
@@ -673,7 +721,7 @@ def main():
     print("\nLoading CLIP processor and BERT tokenizer...")
     
     clip_processor = CLIPImageProcessor.from_pretrained(CLIP_MODEL_NAME)
-    bert_tokenizer = AutoTokenizer.from_pretrained(BERT_MODEL_NAME)
+    clip_tokenizer = CLIPTokenizer.from_pretrained(CLIP_MODEL_NAME)
     
     # -------------------------------------------------------------------------
     # Create Datasets and DataLoaders
@@ -684,14 +732,14 @@ def main():
         data=train_data,
         image_root=IMAGE_ROOT,
         clip_processor=clip_processor,
-        bert_tokenizer=bert_tokenizer
+        clip_tokenizer=clip_tokenizer
     )
     
     test_dataset = RouterDataset(
         data=test_data,
         image_root=IMAGE_ROOT,
         clip_processor=clip_processor,
-        bert_tokenizer=bert_tokenizer
+        clip_tokenizer=clip_tokenizer
     )
     
     train_loader = DataLoader(
@@ -720,7 +768,6 @@ def main():
     
     model = QueryAwareRouter(
         clip_model_name=CLIP_MODEL_NAME,
-        bert_model_name=BERT_MODEL_NAME,
         hidden_dim=HIDDEN_DIM,
         num_classes=NUM_CLASSES
     )
