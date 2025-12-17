@@ -628,7 +628,7 @@ def main():
     
     print(f"Total samples loaded: {len(all_data)}")
     
-    # Analyze class distribution
+    # Analyze class distribution and compute class weights
     class_counts = {}
     for item in all_data:
         layer = item.get("target_layer_name", f"layer_{item['target_layer']}")
@@ -639,6 +639,23 @@ def main():
         count = class_counts.get(layer_name, 0)
         percentage = (count / len(all_data)) * 100
         print(f"  {layer_name}: {count} ({percentage:.1f}%)")
+    
+    # Compute class weights (inverse frequency)
+    # weight_i = total_samples / (num_classes * count_i)
+    total_samples = len(all_data)
+    class_weights = []
+    for layer_name in LAYER_NAMES:
+        count = class_counts.get(layer_name, 1)  # avoid division by zero
+        weight = total_samples / (NUM_CLASSES * count)
+        class_weights.append(weight)
+    
+    # Normalize weights so the minimum weight is 1.0
+    min_weight = min(class_weights)
+    class_weights = [w / min_weight for w in class_weights]
+    
+    print("\nComputed class weights (for Weighted CrossEntropyLoss):")
+    for i, layer_name in enumerate(LAYER_NAMES):
+        print(f"  {layer_name}: {class_weights[i]:.4f}")
     
     # Shuffle and split data
     random.shuffle(all_data)
@@ -722,7 +739,9 @@ def main():
     # -------------------------------------------------------------------------
     # Initialize Loss, Optimizer, and Scheduler
     # -------------------------------------------------------------------------
-    criterion = nn.CrossEntropyLoss()
+    # Use Weighted CrossEntropyLoss to handle class imbalance
+    weight_tensor = torch.tensor(class_weights, dtype=torch.float32).to(device)
+    criterion = nn.CrossEntropyLoss(weight=weight_tensor)
     
     # Only optimize trainable parameters
     optimizer = AdamW(
@@ -737,6 +756,7 @@ def main():
     print(f"  Weight decay: {WEIGHT_DECAY}")
     print(f"  Batch size: {BATCH_SIZE}")
     print(f"  Number of epochs: {NUM_EPOCHS}")
+    print(f"  Loss: Weighted CrossEntropyLoss")
     
     # -------------------------------------------------------------------------
     # Training Loop
