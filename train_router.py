@@ -162,7 +162,6 @@ class RouterDataset(Dataset):
             "input_ids": text_encoding["input_ids"].squeeze(0),
             "attention_mask": text_encoding["attention_mask"].squeeze(0),
             "target_layer": torch.tensor(item["target_layer"], dtype=torch.long),
-            "id": item.get("id", str(idx))
         }
 
 
