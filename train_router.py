@@ -3,9 +3,17 @@
 """
 Train Query-Aware Router for Multi-Modal Large Language Model
 
-This script trains a lightweight router network that dynamically determines
-which vision encoder layer (6, 12, 18, or 23) should be used for a given
-image-question pair.
+This script trains a lightweight router network that predicts whether each
+vision encoder layer (6, 12, 18, or 23) can correctly answer a given question.
+
+Training Strategy:
+- Multi-label classification: Each layer has a binary classifier (can answer / cannot answer)
+- Uses layer_results as ground truth labels
+- BCEWithLogitsLoss for training
+
+Inference Strategy:
+- Select the earliest layer with confidence > threshold
+- Prioritizes shallow layers for efficiency
 
 Author: AI Research Engineer
 Date: 2024
@@ -103,7 +111,7 @@ class RouterDataset(Dataset):
     Each sample contains:
     - image: Preprocessed image tensor
     - question: Raw text question
-    - target_layer: Classification label (0-3)
+    - layer_labels: Multi-label targets [4] indicating if each layer can answer correctly
     """
     
     def __init__(
@@ -116,7 +124,7 @@ class RouterDataset(Dataset):
     ):
         """
         Args:
-            data: List of dictionaries containing image path, question, and target_layer
+            data: List of dictionaries containing image path, question, and layer_results
             image_root: Root directory for images
             clip_processor: CLIP image processor for preprocessing
             clip_tokenizer: CLIP tokenizer for text processing
@@ -127,6 +135,9 @@ class RouterDataset(Dataset):
         self.clip_processor = clip_processor
         self.clip_tokenizer = clip_tokenizer
         self.max_text_length = max_text_length
+        
+        # Layer keys mapping
+        self.layer_keys = ["6", "12", "18", "23"]
         
     def __len__(self) -> int:
         return len(self.data)
@@ -156,11 +167,19 @@ class RouterDataset(Dataset):
             return_tensors="pt"
         )
         
+        # Extract layer_results as multi-label targets
+        # layer_results: {"6": true/false, "12": true/false, "18": true/false, "23": true/false}
+        layer_results = item.get("layer_results", {})
+        layer_labels = []
+        for key in self.layer_keys:
+            # Convert boolean to float (1.0 for True, 0.0 for False)
+            layer_labels.append(1.0 if layer_results.get(key, False) else 0.0)
+        
         return {
             "pixel_values": pixel_values,
             "input_ids": text_encoding["input_ids"].squeeze(0),
             "attention_mask": text_encoding["attention_mask"].squeeze(0),
-            "target_layer": torch.tensor(item["target_layer"], dtype=torch.long),
+            "layer_labels": torch.tensor(layer_labels, dtype=torch.float32),
         }
 
 
@@ -456,7 +475,7 @@ def train_one_epoch(
     Args:
         model: The router model
         dataloader: Training data loader
-        criterion: Loss function
+        criterion: Loss function (BCEWithLogitsLoss)
         optimizer: Optimizer
         device: Device to use
         epoch: Current epoch number
@@ -475,14 +494,14 @@ def train_one_epoch(
         pixel_values = batch["pixel_values"].to(device)
         input_ids = batch["input_ids"].to(device)
         attention_mask = batch["attention_mask"].to(device)
-        targets = batch["target_layer"].to(device)
+        layer_labels = batch["layer_labels"].to(device)  # [B, 4] multi-label targets
         
         # Forward pass
         optimizer.zero_grad()
-        logits = model(pixel_values, input_ids, attention_mask)
+        logits = model(pixel_values, input_ids, attention_mask)  # [B, 4]
         
-        # Compute loss
-        loss = criterion(logits, targets)
+        # Compute BCE loss for multi-label classification
+        loss = criterion(logits, layer_labels)
         
         # Backward pass
         loss.backward()
@@ -505,27 +524,37 @@ def evaluate(
     dataloader: DataLoader,
     criterion: nn.Module,
     device: torch.device,
-    epoch: int
+    epoch: int,
+    confidence_threshold: float = 0.5
 ) -> Tuple[float, float, Dict]:
     """
     Evaluate the model on the test set.
     
+    Inference Strategy:
+    - Apply sigmoid to get confidence scores for each layer
+    - Select the earliest layer with confidence > threshold
+    - If no layer exceeds threshold, select the one with highest confidence
+    - Check if the selected layer's ground truth is True (correct answer)
+    
     Args:
         model: The router model
         dataloader: Test data loader
-        criterion: Loss function
+        criterion: Loss function (BCEWithLogitsLoss)
         device: Device to use
         epoch: Current epoch number
+        confidence_threshold: Threshold for layer selection (default: 0.5)
         
     Returns:
-        Tuple of (average loss, overall accuracy, detailed metrics dict)
+        Tuple of (average loss, routing accuracy, detailed metrics dict)
     """
     model.eval()
     total_loss = 0.0
     num_batches = 0
     
-    all_preds = []
-    all_targets = []
+    all_selected_layers = []  # Which layer was selected by the router
+    all_correct = []  # Whether the selected layer can answer correctly
+    all_confidences = []  # Confidence scores for all layers
+    all_labels = []  # Ground truth labels
     
     pbar = tqdm(dataloader, desc=f"Epoch {epoch+1} [Eval]", leave=True)
     
@@ -534,46 +563,76 @@ def evaluate(
         pixel_values = batch["pixel_values"].to(device)
         input_ids = batch["input_ids"].to(device)
         attention_mask = batch["attention_mask"].to(device)
-        targets = batch["target_layer"].to(device)
+        layer_labels = batch["layer_labels"].to(device)  # [B, 4]
         
         # Forward pass
-        logits = model(pixel_values, input_ids, attention_mask)
+        logits = model(pixel_values, input_ids, attention_mask)  # [B, 4]
         
         # Compute loss
-        loss = criterion(logits, targets)
+        loss = criterion(logits, layer_labels)
         total_loss += loss.item()
         num_batches += 1
         
-        # Get predictions
-        preds = torch.argmax(logits, dim=-1)
+        # Get confidence scores (apply sigmoid)
+        confidences = torch.sigmoid(logits)  # [B, 4]
         
-        all_preds.extend(preds.cpu().numpy().tolist())
-        all_targets.extend(targets.cpu().numpy().tolist())
+        # For each sample, select the earliest layer with confidence > threshold
+        batch_size = confidences.size(0)
+        for i in range(batch_size):
+            conf = confidences[i].cpu().numpy()  # [4]
+            labels = layer_labels[i].cpu().numpy()  # [4]
+            
+            # Find earliest layer with confidence > threshold
+            selected_layer = -1
+            for layer_idx in range(4):
+                if conf[layer_idx] > confidence_threshold:
+                    selected_layer = layer_idx
+                    break
+            
+            # If no layer exceeds threshold, select the one with highest confidence
+            if selected_layer == -1:
+                selected_layer = int(np.argmax(conf))
+            
+            # Check if the selected layer can answer correctly
+            is_correct = labels[selected_layer] > 0.5
+            
+            all_selected_layers.append(selected_layer)
+            all_correct.append(is_correct)
+            all_confidences.append(conf)
+            all_labels.append(labels)
     
     # Calculate metrics
     avg_loss = total_loss / num_batches
-    overall_accuracy = accuracy_score(all_targets, all_preds)
+    routing_accuracy = np.mean(all_correct)
     
-    # Generate detailed classification report
-    report_dict = classification_report(
-        all_targets, 
-        all_preds, 
-        target_names=LAYER_NAMES,
-        output_dict=True,
-        zero_division=0
-    )
+    # Per-layer statistics
+    layer_selection_counts = [0, 0, 0, 0]
+    layer_correct_counts = [0, 0, 0, 0]
+    layer_total_correct = [0, 0, 0, 0]  # How many samples have this layer as correct
     
-    # Generate confusion matrix
-    conf_matrix = confusion_matrix(all_targets, all_preds)
+    for i, (selected, correct, labels) in enumerate(zip(all_selected_layers, all_correct, all_labels)):
+        layer_selection_counts[selected] += 1
+        if correct:
+            layer_correct_counts[selected] += 1
+        for j in range(4):
+            if labels[j] > 0.5:
+                layer_total_correct[j] += 1
+    
+    # Calculate average confidence per layer
+    all_confidences = np.array(all_confidences)
+    avg_confidences = np.mean(all_confidences, axis=0)
     
     metrics = {
-        "classification_report": report_dict,
-        "confusion_matrix": conf_matrix,
-        "predictions": all_preds,
-        "targets": all_targets
+        "selected_layers": all_selected_layers,
+        "correct": all_correct,
+        "layer_selection_counts": layer_selection_counts,
+        "layer_correct_counts": layer_correct_counts,
+        "layer_total_correct": layer_total_correct,
+        "avg_confidences": avg_confidences,
+        "all_labels": all_labels,
     }
     
-    return avg_loss, overall_accuracy, metrics
+    return avg_loss, routing_accuracy, metrics
 
 
 def print_evaluation_results(
@@ -583,67 +642,43 @@ def print_evaluation_results(
     accuracy: float,
     metrics: Dict
 ):
-    """Print formatted evaluation results."""
+    """Print formatted evaluation results for multi-label routing."""
     print("\n" + "=" * 70)
     print(f"Epoch {epoch + 1} Results")
     print("=" * 70)
     print(f"  Training Loss:   {train_loss:.4f}")
     print(f"  Evaluation Loss: {eval_loss:.4f}")
-    print(f"  Overall Accuracy: {accuracy * 100:.2f}%")
+    print(f"  Routing Accuracy: {accuracy * 100:.2f}%")
+    print(f"  (Routing Accuracy = selected layer can answer correctly)")
     
     print("\n" + "-" * 70)
-    print("Class-wise Performance:")
+    print("Average Confidence per Layer:")
     print("-" * 70)
-    
-    report = metrics["classification_report"]
-    print(f"{'Class':<15} {'Precision':<12} {'Recall':<12} {'F1-Score':<12} {'Support':<10}")
-    print("-" * 70)
-    
-    for layer_name in LAYER_NAMES:
-        if layer_name in report:
-            stats = report[layer_name]
-            print(f"{layer_name:<15} {stats['precision']:.4f}       {stats['recall']:.4f}       {stats['f1-score']:.4f}       {int(stats['support'])}")
-    
-    print("-" * 70)
-    print(f"{'Macro Avg':<15} {report['macro avg']['precision']:.4f}       {report['macro avg']['recall']:.4f}       {report['macro avg']['f1-score']:.4f}")
-    print(f"{'Weighted Avg':<15} {report['weighted avg']['precision']:.4f}       {report['weighted avg']['recall']:.4f}       {report['weighted avg']['f1-score']:.4f}")
+    avg_conf = metrics["avg_confidences"]
+    for i, layer_name in enumerate(LAYER_NAMES):
+        bar = "█" * int(avg_conf[i] * 50)
+        print(f"  {layer_name}: {avg_conf[i]:.4f} {bar}")
     
     print("\n" + "-" * 70)
-    print("Confusion Matrix:")
+    print("Layer Selection Distribution:")
     print("-" * 70)
-    print(f"{'Pred →':<12}", end="")
-    for name in LAYER_NAMES:
-        print(f"{name:<12}", end="")
-    print("\n" + "True ↓")
-    
-    conf_matrix = metrics["confusion_matrix"]
-    for i, row in enumerate(conf_matrix):
-        print(f"{LAYER_NAMES[i]:<12}", end="")
-        for val in row:
-            print(f"{val:<12}", end="")
-        print()
-    
-    # Check for class imbalance in predictions
-    print("\n" + "-" * 70)
-    print("Prediction Distribution Analysis:")
-    print("-" * 70)
-    
-    pred_counts = {}
-    for pred in metrics["predictions"]:
-        layer_name = LAYER_NAMES[pred]
-        pred_counts[layer_name] = pred_counts.get(layer_name, 0) + 1
-    
-    total_preds = len(metrics["predictions"])
-    for layer_name in LAYER_NAMES:
-        count = pred_counts.get(layer_name, 0)
-        percentage = (count / total_preds) * 100 if total_preds > 0 else 0
+    total_samples = sum(metrics["layer_selection_counts"])
+    for i, layer_name in enumerate(LAYER_NAMES):
+        count = metrics["layer_selection_counts"][i]
+        correct = metrics["layer_correct_counts"][i]
+        percentage = (count / total_samples) * 100 if total_samples > 0 else 0
+        acc = (correct / count * 100) if count > 0 else 0
         bar = "█" * int(percentage / 2)
-        print(f"  {layer_name:<12}: {count:>5} ({percentage:>5.1f}%) {bar}")
+        print(f"  {layer_name}: {count:>5} ({percentage:>5.1f}%) | Acc: {acc:>5.1f}% {bar}")
     
-    # Warning if model is biased towards one class
-    max_pred_pct = max((pred_counts.get(ln, 0) / total_preds * 100) for ln in LAYER_NAMES) if total_preds > 0 else 0
-    if max_pred_pct > 50:
-        print("\n⚠️  WARNING: Model may be biased - one class has >50% of predictions!")
+    print("\n" + "-" * 70)
+    print("Ground Truth Distribution (samples where layer can answer):")
+    print("-" * 70)
+    for i, layer_name in enumerate(LAYER_NAMES):
+        count = metrics["layer_total_correct"][i]
+        percentage = (count / total_samples) * 100 if total_samples > 0 else 0
+        bar = "█" * int(percentage / 2)
+        print(f"  {layer_name}: {count:>5} ({percentage:>5.1f}%) {bar}")
     
     print("=" * 70 + "\n")
 
@@ -676,34 +711,24 @@ def main():
     
     print(f"Total samples loaded: {len(all_data)}")
     
-    # Analyze class distribution and compute class weights
-    class_counts = {}
+    # Analyze layer_results distribution (multi-label statistics)
+    layer_true_counts = {layer: 0 for layer in LAYER_NAMES}
+    valid_samples = 0
+    
     for item in all_data:
-        layer = item.get("target_layer_name", f"layer_{item['target_layer']}")
-        class_counts[layer] = class_counts.get(layer, 0) + 1
+        layer_results = item.get("layer_results", {})
+        if layer_results:
+            valid_samples += 1
+            for layer_name in LAYER_NAMES:
+                layer_key = layer_name.replace("layer_", "")  # "layer_6" -> "6"
+                if layer_results.get(layer_key, False):
+                    layer_true_counts[layer_name] += 1
     
-    print("\nClass distribution in dataset:")
+    print(f"\nMulti-label statistics (samples where layer can answer correctly):")
     for layer_name in LAYER_NAMES:
-        count = class_counts.get(layer_name, 0)
-        percentage = (count / len(all_data)) * 100
-        print(f"  {layer_name}: {count} ({percentage:.1f}%)")
-    
-    # Compute class weights (inverse frequency)
-    # weight_i = total_samples / (num_classes * count_i)
-    total_samples = len(all_data)
-    class_weights = []
-    for layer_name in LAYER_NAMES:
-        count = class_counts.get(layer_name, 1)  # avoid division by zero
-        weight = total_samples / (NUM_CLASSES * count)
-        class_weights.append(weight)
-    
-    # Normalize weights so the minimum weight is 1.0
-    min_weight = min(class_weights)
-    class_weights = [w / min_weight for w in class_weights]
-    
-    print("\nComputed class weights (for Weighted CrossEntropyLoss):")
-    for i, layer_name in enumerate(LAYER_NAMES):
-        print(f"  {layer_name}: {class_weights[i]:.4f}")
+        count = layer_true_counts[layer_name]
+        percentage = (count / valid_samples) * 100 if valid_samples > 0 else 0
+        print(f"  {layer_name}: {count}/{valid_samples} ({percentage:.1f}%)")
     
     # Shuffle and split data
     random.shuffle(all_data)
@@ -786,9 +811,8 @@ def main():
     # -------------------------------------------------------------------------
     # Initialize Loss, Optimizer, and Scheduler
     # -------------------------------------------------------------------------
-    # Use Weighted CrossEntropyLoss to handle class imbalance
-    weight_tensor = torch.tensor(class_weights, dtype=torch.float32).to(device)
-    criterion = nn.CrossEntropyLoss(weight=weight_tensor)
+    # Use BCEWithLogitsLoss for multi-label classification
+    criterion = nn.BCEWithLogitsLoss()
     
     # Only optimize trainable parameters
     optimizer = AdamW(
@@ -803,7 +827,7 @@ def main():
     print(f"  Weight decay: {WEIGHT_DECAY}")
     print(f"  Batch size: {BATCH_SIZE}")
     print(f"  Number of epochs: {NUM_EPOCHS}")
-    print(f"  Loss: Weighted CrossEntropyLoss")
+    print(f"  Loss: BCEWithLogitsLoss (multi-label classification)")
     
     # -------------------------------------------------------------------------
     # Training Loop
